@@ -1,0 +1,101 @@
+#!/bin/bash
+# INSTALL.
+# Generic INSTALL script
+#
+# Author: Torsten Juul-Jensen
+# Date: May 3, 2019
+#
+# Install all .sh script files by putting symlinks into a destination directory (default is users's ~/bin dir)
+#
+DESTINATIONDIR=~/bin #default installation directory
+SCRIPT_NAME=$(basename $0)
+FILEFILTER="*" # customizable filter for selecting which executable files to process - "all files" (*) is the default
+SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )" #set the variable to the place where script is loaded from
+
+_set-flags-init() {
+    REMOVESYMLINKS=0
+    CREATESYMLINKS=0
+}
+
+_parse_arguments () {
+    _set-flags-init
+
+      if [[ $# -eq 0 ]] ; then
+        CREATESYMLINKS=1
+      fi
+
+      while [[ $# -gt 0 ]]
+      do
+        case $1 in
+            -r | --remove )
+                REMOVESYMLINKS=1
+                if [ -d "${2}" ] ; then
+                  DESTINATIONDIR=$2
+                  shift
+                fi
+                shift
+                ;;
+            -c | --create)
+              if [ -d "${2}" ] ; then
+                DESTINATIONDIR=$2
+                CREATESYMLINKS=1
+              elif [ "$2" = "" ] ; then
+                # DESTINATIONDIR is default
+                CREATESYMLINKS=1
+                DESTINATIONDIR=~/bin
+              else
+                echo Target directory does not exist
+                exit 2
+              fi
+              shift
+              shift
+              ;;
+            -h | --help )
+              _help
+              exit 1
+              ;;
+            * )
+              if [ -d "${1}" ] ; then # there is only a single parameter and it is a directory
+                DESTINATIONDIR=$1
+                CREATESYMLINKS=1
+              else #Invalid input
+                echo The input is not a valid directory
+                _help
+                exit 2
+              fi
+        esac
+    done
+}
+
+_help()
+{
+    echo "usage: $SCRIPT_NAME [[--create] [--remove ] <TargetDirectory>] [--help]  "
+    echo "       (default destination is: $DESTINATIONDIR)"
+    exit 1
+}
+
+_removeSymlinks(){
+  find $DESTINATIONDIR -lname "$SCRIPTDIR/*" -delete -print 2>/dev/null
+}
+
+_createSymlinks(){
+  # Make symbolic links to all .sh files in directory
+  for f in $FILEFILTER ; do
+      if [ "$f" = $SCRIPT_NAME -o ! -x "$f" ] ; then  # Either the script itself or not executable
+          continue
+      fi
+      if [ -f "${f}" ] ; then # if it is a file make symlink (skip directories)
+        echo "$f"
+        ln -fs "$(realpath "$f")" "$DESTINATIONDIR/$f"
+      fi
+  done
+}
+
+### main ###
+
+# Parse command line arguments in a function
+_parse_arguments $@
+
+# If flags are set, execute create or remove functions
+(( $REMOVESYMLINKS == 1)) && _removeSymlinks
+(( $CREATESYMLINKS == 1)) && _createSymlinks
