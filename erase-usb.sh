@@ -18,6 +18,7 @@ if [[ ! -z ${USBSTORAGE} ]] ; then
     sudo bash -c "dd if=/dev/urandom of=$DISKDEVICE bs=1M conv=fdatasync &"
   else
     echo Please end current running dd process on this device before starting a new.
+    exit 1
   fi
 else
   echo Device not found or device is not a USB storage device
