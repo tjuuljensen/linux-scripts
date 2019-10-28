@@ -1,1 +1,1 @@
-grep -E '^[[:space:]]*([[:alnum:]_]+[[:space:]]*\(\)|function[[:space:]]+[[:alnum:]_]+)' fedora-lib.sh  | sed -e 's/[(){)]//g' 
+grep -E '^[[:space:]]*([[:alnum:]_]+[[:space:]]*\(\)|function[[:space:]]+[[:alnum:]_]+)' $1 | sed -e 's/[(){)]//g' 
