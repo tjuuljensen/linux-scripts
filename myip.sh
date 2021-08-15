@@ -7,7 +7,7 @@ OPENDNSRESOLVEDIP=$(dig +short myip.opendns.com @resolver1.opendns.com)
 GOOGLERESOLVEDIP=$(dig TXT +short o-o.myaddr.l.google.com @ns1.google.com | sed 's/"//g')
 LOCALIP=$(ip route get 8.8.8.8 | sed -n '/src/{s/.*src *\([^ ]*\).*/\1/p;q}')
 
-# wanip curl method: echo $(curl -s ipinfo.io/ip )
+# wanip: echo $(curl -s ipinfo.io/ip )
 # localip=$(hostname -i|cut -f2 -d ' ')
 
 # compare results - if different, report both (this happens sometimes on anonymized services)
