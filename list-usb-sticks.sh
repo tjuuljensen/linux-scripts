@@ -19,7 +19,7 @@ for DISK in $DISKS ; do
     ID_MODEL=$(udevadm info --query=all -n $DISKDEVICE 2>/dev/null | grep "ID_MODEL=" )
     ID_FS_LABEL=$(udevadm info --query=all -n $DISKDEVICE 2>/dev/null | grep "ID_FS_LABEL=" )
 
-    # get dd commend lines if there ara any running dd processes on this device
+    # get dd command lines if there are any running dd processes on this device
     RUNNINGDDCMD=$(pgrep "dd" -a | grep $DISKDEVICE ) #| cut -c 6-)
     #RUNNINGPID=$(pgrep "dd" -a | grep $DISKDEVICE | awk '{print $1}')
 
