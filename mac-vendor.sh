@@ -2,7 +2,7 @@
 #
 # mac-vendor.sh - Get the vendor for a mac address from the terminal.
 # By: tjuuljensen@gmail.com
-# Original credits to: redperadot@darkgem.net
+# Original idea & credits to: redperadot@darkgem.net
 
 # define constants
 INSTALLDIR=/opt/macvendor
@@ -11,6 +11,7 @@ TEMPLATE_START="tmp.macvndr-"
 TEMPLATE_TODAY=$TEMPLATE_START$(date +"%Y-%m-%d")
 TMPFILE_TEMPLATE=$TEMPLATE_TODAY"-XXXX"
 TMPDIR=/tmp
+OUI_AGE=7
 
 # Define variables
 LATEST_FILE_FROM_TODAY=$(find $TMPDIR -type f -size +0 -name $TEMPLATE_TODAY* -printf "%T@ %Td-%Tb-%TY %Tk:%TM %p\n" 2>/dev/null | sort -n -r | awk ' NR==1 { print $4 }')
@@ -37,6 +38,7 @@ download_oui_bg()
 
   # Create temp file
   OUI_TXTFILE=$(mktemp --tmpdir $TMPFILE_TEMPLATE)
+  chmod +r $OUI_TXTFILE
 
   # Start loading process in the background
   curl -sf https://standards-oui.ieee.org/oui/oui.txt -o $OUI_TXTFILE&
@@ -49,9 +51,21 @@ download_oui_bg()
 get_oui_file()
 {
   # Check for installed or cached files or start the download in the background
-  if [ -f $INSTALL_FILE ] ; then # Installed
-    OUI_TXTFILE=$INSTALL_FILE
-  elif [ -f $LATEST_FILE_FROM_TODAY ] && [ -s $LATEST_FILE_FROM_TODAY ] ; then # cached / A non-zero byte file exists from today
+  if [[ -f $INSTALL_FILE ]] ; then # Installed
+    if [[ $(find "$INSTALL_FILE" -mtime +$OUI_AGE -print) ]]; then # file is older than x days (from variable $OUI_AGE)
+      if [[ "$UID" -ne 0 ]] ; then # user is not root
+        echo "File $INSTALL_FILE exists and is older than $OUI_AGE days."
+        echo "You should update the file as root."
+        OUI_TXTFILE=$INSTALL_FILE
+      else # file is older than 7 days and user has root privileges
+        echo "File $INSTALL_FILE exists and is older than $OUI_AGE days."
+        install_local
+        OUI_TXTFILE=$INSTALL_FILE
+      fi
+    else
+      OUI_TXTFILE=$INSTALL_FILE
+    fi
+  elif [[ -f $LATEST_FILE_FROM_TODAY ]] && [[ -s $LATEST_FILE_FROM_TODAY ]] ; then # cached / A non-zero byte file exists from today
     OUI_TXTFILE=$LATEST_FILE_FROM_TODAY
   else # must download first
     # start download in background - OUI_TXTFILE will be set inside the function
@@ -149,7 +163,6 @@ install_local()
   # cleanup - remove all
   find $TMPDIR -type f -name "$TEMPLATE_START*" -delete 2>/dev/null
 
-  exit 0
 
 }
 
@@ -181,6 +194,7 @@ while getopts ":s:a:ih" opt; do
     i )
         [ "$UID" -eq 0 ] || exec sudo bash "$0" "$@"
         install_local
+        exit 0
         ;;
     h )
         help
@@ -192,7 +206,7 @@ while getopts ":s:a:ih" opt; do
 done
 
 
-# Do the following when opts are a, a or empty
+# Do the following when opts are s, a or empty
 
 # Set the name of the file to use (optionally start background download)
 get_oui_file
