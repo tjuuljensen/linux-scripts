@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# whatismyip.#!/bin/sh
+# whatismyip
 
 # resolved ip address on OpenDNS and Google
 OPENDNSRESOLVEDIP=$(dig +short myip.opendns.com @resolver1.opendns.com)
