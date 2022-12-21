@@ -26,7 +26,7 @@ help()
   echo "MAC Vendor Help"
   echo "$SCRIPT_NAME -a 'MAC Address' | Get the vendor of the specified address."
   echo "$SCRIPT_NAME -s 'MAC Address' | Silent, only output result."
-  echo "$SCRIPT_NAME -i | Install the program on your system (put oui.txt in /opt)"
+  echo "$SCRIPT_NAME -i | Install the program on your system (put oui.txt in ${INSTALLDIR})"
   exit 0
 }
 
