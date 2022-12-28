@@ -26,6 +26,12 @@ echo "1. Go to Gnome Boxes and add new VM. "
 echo "2. Select Windows 11 ISO and start install (NOT express install)."
 echo "3. At the Language select window, exit the install by clicking the close button (top right) of the installer window inside the VM."
 
+read -r -p "Do you want to continue? [y/N] " RESPONSE
+RESPONSE=${RESPONSE,,}
+if [[ ! $RESPONSE =~ ^(yes|y| ) ]] ; then
+  exit 2
+fi
+
 # Check if gnome-boxes is running and start if not
 pidof -q gnome-boxes || nohup gnome-boxes >/dev/null 2>&1 &
 
