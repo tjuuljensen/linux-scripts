@@ -20,8 +20,19 @@ echo ''
 STARTVMLIST=$(virsh list --all --name)
 NEWVMLIST=${STARTVMLIST}
 
+if [[ $(virsh list | grep running | awk '{print $2}' | wc -l) -gt 0 ]] ; then
+  echo "VM's are currently running."
+  echo "CONSIDER REBOOTING if you have started a VM in this login session"
+  read -r -p "Do you want to shut down running VM's and continue? [y/N] " RESPONSE
+  RESPONSE=${RESPONSE,,}
+  if [[ ! $RESPONSE =~ ^(yes|y| ) ]] ; then
+    for i in $(virsh list | grep running | awk '{print $2}')
+    do
+      virsh shutdown $i;
+    done
+  fi
+
 # Prompt to perform actions in Gnome Boxes
-echo "0. CONSIDER REBOOTING if you have started a VM in this login session (may be nescessary)"
 echo "1. Go to Gnome Boxes and add new VM. "
 echo "2. Select Windows 11 ISO and start install (NOT express install)."
 echo "3. At the Language select window, exit the install by clicking the close button (top right) of the installer window inside the VM."
@@ -29,7 +40,7 @@ echo "3. At the Language select window, exit the install by clicking the close b
 read -r -p "Do you want to continue? [y/N] " RESPONSE
 RESPONSE=${RESPONSE,,}
 if [[ ! $RESPONSE =~ ^(yes|y| ) ]] ; then
-  exit 2
+  exit 1
 fi
 
 # Check if gnome-boxes is running and start if not
@@ -63,12 +74,14 @@ NEWNAMEWIN="${NEWNAMENOSPACE//windows-11/win11}"
 [[ "${NEWNAMEWIN:10:1}" == "-" ]] && NEWSHORTNAME="${NEWNAMEWIN:0:10}" || NEWSHORTNAME="${NEWNAMEWIN:0:11}"
 
 # add suffix to short name if file exists
-NUMBER=1
-VMNAME="${NEWSHORTNAME}"
-cd ~/.config/libvirt/qemu/
-while [ -e "${VMNAME}.xml" ]; do
-    printf -v VMNAME '%s-%02d' "${NEWSHORTNAME}" "$(( ++NUMBER ))"
-  done
+if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+  NUMBER=1
+  VMNAME="${NEWSHORTNAME}"
+  cd ~/.config/libvirt/qemu/
+  while [ -e "${VMNAME}.xml" ]; do
+      printf -v VMNAME '%s-%02d' "${NEWSHORTNAME}" "$(( ++NUMBER ))"
+    done
+fi
 
 # force close VM if it is running
 (virsh list --state-running --name | grep $TMPVMNAME -q ) &&  read -p "VM is still running, choose force shutdown in Boxes or press <Enter> to force close"
@@ -82,12 +95,20 @@ virsh dumpxml --inactive --security-info ${TMPVMNAME} > ${EDITFILE}
 echo Closing gnome-boxes.
 pkill gnome-boxes > /dev/null
 
+# Getting ISO info from file
+echo Getting ISO file and re-adding it to persistent config...
+ISO=$(awk '/<media>/,/<\/media>/' ${EDITFILE} | sed -E -e 's/<media>|<\/media>//g')
+ISOTRIMMED=${ISO// /}
+ISOSED=${ISOTRIMMED//\//\\\/}
+sed -i "s/name='qemu' type='raw'\/>/name='qemu' type='raw'\/>\n\t<driver name='file'\/>\n\t<source file='${ISOSED}'\/>/g"  ${EDITFILE}
+
+
 echo Adding TPM...
 sed -i '/<devices>/a <tpm model="tpm-crb">\n  <backend type="emulator" version="2.0"/>\n</tpm>' ${EDITFILE}
 
 # check this line (match to verify BIOS virtualization is on):
 # <type arch="x86_64" machine="pc-q35-6.1">hvm</type>
-echo I should be checking something here...
+echo "I should be checking BIOS virtualization here... (but I'm not)"
 
 # Check that /usr/share/edk2/ovmf/OVMF_CODE.secboot.fd exists (fedora specific)
 # It’s located in /usr/share/edk2/ovmf/ in Fedora Linux 34 and in /usr/share/OVMF/ in Ubuntu 22.
@@ -97,18 +118,22 @@ grep -q loader ${EDITFILE} || sed -i "/<os>/a <loader readonly=\"yes\" type=\"pf
 
 # Setting new name in XML
 echo Renaming VM...
-sed -i "s/<name>.*<\/name>/<name>${VMNAME}<\/name>/g" ${EDITFILE}
+if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+  sed -i "s/<name>.*<\/name>/<name>${VMNAME}<\/name>/g" ${EDITFILE}
+fi
 sed -i "s/<title>.*<\/title>/<title>${VMLONGNAME}<\/title>/g" ${EDITFILE}
 
 # Rename storage file and change config so it matches
-echo Renaming storage file and changing config file...
-mv ~/.local/share/gnome-boxes/images/${TMPVMNAME} ~/.local/share/gnome-boxes/images/${VMNAME}
-sed -i "s/gnome-boxes\/images\/${TMPVMNAME}/gnome-boxes\/images\/${VMNAME}/g" ${EDITFILE}
+if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+  echo Renaming storage file and changing config file...
+  mv ~/.local/share/gnome-boxes/images/${TMPVMNAME} ~/.local/share/gnome-boxes/images/${VMNAME}
+  sed -i "s/gnome-boxes\/images\/${TMPVMNAME}/gnome-boxes\/images\/${VMNAME}/g" ${EDITFILE}
+fi
 
 # Delete tmp VM and import new from file
 virsh undefine ${TMPVMNAME} --managed-save > /dev/null
 virsh define ${EDITFILE}
 
-echo "Done. Remember to re-add Windows 11 ISO in VM"
+echo "Done."
 # Check if gnome-boxes is running and start if not
 pidof -q gnome-boxes || nohup gnome-boxes >/dev/null 2>&1 &
