@@ -1,12 +1,12 @@
 #!/bin/bash
+# Author: tjuuljensen@gmail.com
+# Date: 7 January 2023
 #
 # urlxray.sh - command line URL X-ray for looking up tiny url's from command line
-# By: tjuuljensen@gmail.com
-# Date: 7 January 2023
+#
 
 
 if [[ $# == 0 ]] ; then
-  echo "Missing input."
   echo "Syntax: $0 <INPUT_URL>"
   exit 1
 fi

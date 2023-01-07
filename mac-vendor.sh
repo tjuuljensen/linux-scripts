@@ -1,7 +1,8 @@
 #!/bin/bash
 #
+# Author: tjuuljensen@gmail.com
+#
 # mac-vendor.sh - Get the vendor for a mac address from the terminal.
-# By: tjuuljensen@gmail.com
 # Original idea & credits to: redperadot@darkgem.net
 
 # define constants
