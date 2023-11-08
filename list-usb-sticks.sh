@@ -23,8 +23,13 @@ for DISK in $DISKS ; do
     RUNNINGDDCMD=$(pgrep "dd" -a | grep $DISKDEVICE ) #| cut -c 6-)
     #RUNNINGPID=$(pgrep "dd" -a | grep $DISKDEVICE | awk '{print $1}')
 
+    ID_MODEL=${ID_MODEL##*=}
+    ID_VENDOR=${ID_VENDOR##*\-}
+
     # Print information to screen
-    echo "$DISKDEVICE - ${ID_VENDOR##*=} ${ID_MODEL##*=} ${ID_FS_LABEL##*=}  $RUNNINGDDCMD $RUNNINGPID"
+    if [[ ! "$ID_MODEL" == "SD_MMC" ]] ; then
+      echo "$DISKDEVICE - ${ID_VENDOR##*=} ${ID_MODEL##*=} ${ID_FS_LABEL##*=}  $RUNNINGDDCMD $RUNNINGPID"
+    fi
 
   fi
 done
