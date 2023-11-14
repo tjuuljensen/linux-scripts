@@ -14,7 +14,7 @@ done
 # User context:
 echo Checking tpm config files...
 swtpm_setup --create-config-files skip-if-exist
-echo ''
+echo ' '
 
 # Get start context for VMs
 STARTVMLIST=$(virsh list --all --name)
@@ -25,12 +25,16 @@ if [[ $(virsh list | grep running | awk '{print $2}' | wc -l) -gt 0 ]] ; then
   echo "CONSIDER REBOOTING if you have started a VM in this login session"
   read -r -p "Do you want to shut down running VM's and continue? [y/N] " RESPONSE
   RESPONSE=${RESPONSE,,}
-  if [[ ! $RESPONSE =~ ^(yes|y| ) ]] ; then
+  if [[ $RESPONSE =~ ^(yes|y| ) ]] ; then
     for i in $(virsh list | grep running | awk '{print $2}')
     do
       virsh shutdown $i;
     done
+  else 
+    echo "Exiting. Please reboot before installation."
+    exit 1
   fi
+fi
 
 # Prompt to perform actions in Gnome Boxes
 echo "1. Go to Gnome Boxes and add new VM. "
@@ -74,7 +78,7 @@ NEWNAMEWIN="${NEWNAMENOSPACE//windows-11/win11}"
 [[ "${NEWNAMEWIN:10:1}" == "-" ]] && NEWSHORTNAME="${NEWNAMEWIN:0:10}" || NEWSHORTNAME="${NEWNAMEWIN:0:11}"
 
 # add suffix to short name if file exists
-if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+if [ ! "${TMPVMNAME}" == "${VMNAME}" ] ; then
   NUMBER=1
   VMNAME="${NEWSHORTNAME}"
   cd ~/.config/libvirt/qemu/
@@ -100,7 +104,7 @@ echo Getting ISO file and re-adding it to persistent config...
 ISO=$(awk '/<media>/,/<\/media>/' ${EDITFILE} | sed -E -e 's/<media>|<\/media>//g')
 ISOTRIMMED=${ISO// /}
 ISOSED=${ISOTRIMMED//\//\\\/}
-sed -i "s/name='qemu' type='raw'\/>/name='qemu' type='raw'\/>\n\t<driver name='file'\/>\n\t<source file='${ISOSED}'\/>/g"  ${EDITFILE}
+sed -i "s/name='qemu' type='raw'\/>/name='qemu' type='raw'\/>\n\t<driver name='file'\/>\n\t<source file='$ISOSED'\/>/g"  ${EDITFILE}
 
 
 echo Adding TPM...
@@ -118,13 +122,13 @@ grep -q loader ${EDITFILE} || sed -i "/<os>/a <loader readonly=\"yes\" type=\"pf
 
 # Setting new name in XML
 echo Renaming VM...
-if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+if [ ! "${TMPVMNAME}" == "${VMNAME}" ] ; then
   sed -i "s/<name>.*<\/name>/<name>${VMNAME}<\/name>/g" ${EDITFILE}
 fi
 sed -i "s/<title>.*<\/title>/<title>${VMLONGNAME}<\/title>/g" ${EDITFILE}
 
 # Rename storage file and change config so it matches
-if [ ${TMPVMNAME} != ${VMNAME} ] ; then
+if [ ! "${TMPVMNAME}" == "${VMNAME}" ] ; then
   echo Renaming storage file and changing config file...
   mv ~/.local/share/gnome-boxes/images/${TMPVMNAME} ~/.local/share/gnome-boxes/images/${VMNAME}
   sed -i "s/gnome-boxes\/images\/${TMPVMNAME}/gnome-boxes\/images\/${VMNAME}/g" ${EDITFILE}
