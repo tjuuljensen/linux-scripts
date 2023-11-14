@@ -2,6 +2,9 @@
 #
 # https://www.ctrl.blog/entry/how-to-win11-in-gnome-boxes.html
 
+# Check if conext is root (has to be user)
+[ "$UID" -eq 0 ] && echo "ERROR: You are root! Script must be run as normal user. " && exit 1
+
 # Check requirements
 clear
 echo Checking required packages...
