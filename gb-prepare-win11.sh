@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gp-prepare-win11.sh
+# gb-prepare-win11.sh
 #
 # Purpose:
 #   Prepare a GNOME Boxes/libvirt user-session VM for Windows 11 by adding
