@@ -13,11 +13,16 @@
 #   ipify is treated as a normal HTTPS provider, not as a fallback. This is
 #   intentional: comparing DNS and HTTPS views can reveal VPN, proxy, split
 #   tunnel, DNS egress, or IPv4/IPv6 asymmetry issues.
+#   Missing dig skips DNS providers; HTTPS remains available through curl.
+#   Missing ip skips local-route information. At least one public-IP lookup
+#   method must be available and enabled; otherwise the script exits 1.
 #
 # Output model:
 #   Text mode:
 #     Default:
 #       Human-readable diagnostic sections.
+#       One successful public provider is reported as single provider.
+#       Consistency requires at least two successful public providers.
 #
 #     -q / --quiet:
 #       Only resolved public IP value(s), one per line.
@@ -28,6 +33,8 @@
 #   JSON mode:
 #     --json:
 #       Result-focused JSON only. No mixed text output.
+#       Includes status and providerCount per enabled address family.
+#       consistent is null with fewer than two successful public providers.
 #
 #     --json -q:
 #       Minimal JSON containing only available public IP keys.
@@ -55,27 +62,34 @@
 #     - local route source address
 #
 # Requirements:
-#   bash, dig, ip
+#   bash, awk, sed, head, sort, wc, and at least one of:
+#     - dig for DNS providers
+#     - curl for HTTPS, unless disabled with --no-https / --no-ipify
+#   jq is required for JSON output.
 #
 # Optional:
-#   curl, jq, timeout
+#   ip for local-route information; timeout for an additional command deadline.
+#   Missing providers are skipped. Warnings appear in normal text output and
+#   debug JSON; quiet output remains limited to resolved addresses.
 #
 # Version:
-#   1.3.0
+#   1.4.0
 #
 # Date:
-#   2026-07-03
+#   2026-10-15
 #
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="${0##*/}"
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 
 CHECK_IPV4=1
 CHECK_IPV6=1
 USE_IPIFY=1
+USE_DNS=1
+USE_LOCAL_ROUTE=1
 JSON_OUTPUT=0
 QUIET=0
 VERBOSE=0
@@ -99,6 +113,11 @@ IPV4_LOCAL_ROUTE_STATUS="not_run"
 IPV6_GOOGLE_DNS_STATUS="not_run"
 IPV6_IPIFY_STATUS="not_run"
 IPV6_LOCAL_ROUTE_STATUS="not_run"
+
+IPV4_PROVIDER_COUNT=0
+IPV6_PROVIDER_COUNT=0
+IPV4_RESULT_STATUS="unavailable"
+IPV6_RESULT_STATUS="unavailable"
 
 WARNINGS=()
 
@@ -207,6 +226,12 @@ Notes:
     address your host would use as the source for outbound traffic.
   - If IPv6 is disabled or unavailable, IPv6 providers report unavailable.
   - Failed providers should not abort the script.
+  - Missing dig skips DNS lookups; enabled HTTPS lookups continue with curl.
+  - Missing ip skips local-route information.
+  - Without dig, curl must be installed and HTTPS must be enabled.
+  - One successful public provider is reported as single provider, not consistent.
+  - Result/debug JSON includes status and providerCount. consistent is null
+    unless at least two public providers succeeded. Local routes do not count.
 
 USAGE
 }
@@ -297,16 +322,27 @@ parse_args() {
 }
 
 require_base_commands() {
-  command_exists dig || die "Required command not found: dig"
-  command_exists ip || die "Required command not found: ip"
-
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     command_exists jq || die "jq is required for --json output."
+  fi
+
+  if ! command_exists dig; then
+    warn "dig not found; DNS providers skipped."
+    USE_DNS=0
+  fi
+
+  if ! command_exists ip; then
+    warn "ip not found; local-route information skipped."
+    USE_LOCAL_ROUTE=0
   fi
 
   if [[ "$USE_IPIFY" -eq 1 ]] && ! command_exists curl; then
     warn "curl not found; ipify HTTPS provider disabled."
     USE_IPIFY=0
+  fi
+
+  if [[ "$USE_DNS" -eq 0 && "$USE_IPIFY" -eq 0 ]]; then
+    die "No public-IP provider available: install dig, or install curl and enable HTTPS (omit --no-https / --no-ipify)."
   fi
 
   if ! command_exists timeout; then
@@ -368,6 +404,11 @@ is_ipv6() {
 query_ipv4_opendns() {
   local value=""
 
+  if [[ "$USE_DNS" -eq 0 ]]; then
+    IPV4_OPENDNS_STATUS="skipped"
+    return 0
+  fi
+
   log "Querying IPv4 via OpenDNS."
 
   value="$(
@@ -386,6 +427,11 @@ query_ipv4_opendns() {
 
 query_ipv4_google_dns() {
   local value=""
+
+  if [[ "$USE_DNS" -eq 0 ]]; then
+    IPV4_GOOGLE_DNS_STATUS="skipped"
+    return 0
+  fi
 
   log "Querying IPv4 via Google DNS TXT."
 
@@ -430,6 +476,11 @@ query_ipv4_ipify() {
 query_ipv4_local_route() {
   local value=""
 
+  if [[ "$USE_LOCAL_ROUTE" -eq 0 ]]; then
+    IPV4_LOCAL_ROUTE_STATUS="skipped"
+    return 0
+  fi
+
   log "Querying IPv4 local route source."
 
   value="$(
@@ -459,6 +510,11 @@ query_ipv4_local_route() {
 
 query_ipv6_google_dns() {
   local value=""
+
+  if [[ "$USE_DNS" -eq 0 ]]; then
+    IPV6_GOOGLE_DNS_STATUS="skipped"
+    return 0
+  fi
 
   log "Querying IPv6 via Google DNS TXT."
 
@@ -518,6 +574,11 @@ query_ipv6_ipify() {
 
 query_ipv6_local_route() {
   local value=""
+
+  if [[ "$USE_LOCAL_ROUTE" -eq 0 ]]; then
+    IPV6_LOCAL_ROUTE_STATUS="skipped"
+    return 0
+  fi
 
   log "Querying IPv6 local route source."
 
@@ -606,12 +667,37 @@ count_lines() {
   sed '/^$/d' | wc -l | awk '{print $1}'
 }
 
+successful_provider_count() {
+  local status count=0
+  for status in "$@"; do
+    if [[ "$status" == ok ]]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "$count"
+}
+
+result_status() {
+  local providers="$1" distinct_values="$2"
+  if [[ "$providers" -eq 0 ]]; then
+    printf 'unavailable\n'
+  elif [[ "$providers" -eq 1 ]]; then
+    printf 'single_provider\n'
+  elif [[ "$distinct_values" -eq 1 ]]; then
+    printf 'consistent\n'
+  else
+    printf 'provider_mismatch\n'
+  fi
+}
+
 assess_consistency() {
   local ipv4_count=0
   local ipv6_count=0
 
   if [[ "$CHECK_IPV4" -eq 1 ]]; then
     ipv4_count="$(public_ipv4_values | count_lines || true)"
+    IPV4_PROVIDER_COUNT="$(successful_provider_count "$IPV4_OPENDNS_STATUS" "$IPV4_GOOGLE_DNS_STATUS" "$IPV4_IPIFY_STATUS")"
+    IPV4_RESULT_STATUS="$(result_status "$IPV4_PROVIDER_COUNT" "$ipv4_count")"
 
     if [[ "$ipv4_count" -gt 1 ]]; then
       warn "IPv4 providers disagree."
@@ -622,6 +708,8 @@ assess_consistency() {
 
   if [[ "$CHECK_IPV6" -eq 1 ]]; then
     ipv6_count="$(public_ipv6_values | count_lines || true)"
+    IPV6_PROVIDER_COUNT="$(successful_provider_count "$IPV6_GOOGLE_DNS_STATUS" "$IPV6_IPIFY_STATUS")"
+    IPV6_RESULT_STATUS="$(result_status "$IPV6_PROVIDER_COUNT" "$ipv6_count")"
 
     if [[ "$ipv6_count" -gt 1 ]]; then
       warn "IPv6 providers disagree."
@@ -644,14 +732,12 @@ status_value_text() {
 
 print_text_ipv4() {
   local result
-  local count
 
   if [[ "$CHECK_IPV4" -eq 0 ]]; then
     return 0
   fi
 
   result="$(first_public_ipv4)"
-  count="$(public_ipv4_values | count_lines || true)"
 
   printf 'IPv4\n'
   printf '====\n'
@@ -664,11 +750,7 @@ print_text_ipv4() {
   if [[ -n "$result" ]]; then
     printf '  Public IPv4:     %s\n' "$result"
 
-    if [[ "$count" -eq 1 ]]; then
-      printf '  Status:          consistent\n'
-    else
-      printf '  Status:          provider mismatch\n'
-    fi
+    printf '  Status:          %s\n' "${IPV4_RESULT_STATUS//_/ }"
   else
     printf '  Public IPv4:     unavailable\n'
     printf '  Status:          unavailable\n'
@@ -679,14 +761,12 @@ print_text_ipv4() {
 
 print_text_ipv6() {
   local result
-  local count
 
   if [[ "$CHECK_IPV6" -eq 0 ]]; then
     return 0
   fi
 
   result="$(first_public_ipv6)"
-  count="$(public_ipv6_values | count_lines || true)"
 
   printf 'IPv6\n'
   printf '====\n'
@@ -698,11 +778,7 @@ print_text_ipv6() {
   if [[ -n "$result" ]]; then
     printf '  Public IPv6:     %s\n' "$result"
 
-    if [[ "$count" -eq 1 ]]; then
-      printf '  Status:          consistent\n'
-    else
-      printf '  Status:          provider mismatch\n'
-    fi
+    printf '  Status:          %s\n' "${IPV6_RESULT_STATUS//_/ }"
   else
     printf '  Public IPv6:     unavailable\n'
     printf '  Status:          unavailable\n'
@@ -724,6 +800,8 @@ print_quiet_text() {
     ipv6_public="$(first_public_ipv6)"
     [[ -n "$ipv6_public" ]] && printf '%s\n' "$ipv6_public"
   fi
+
+  return 0
 }
 
 json_array_from_lines() {
@@ -782,6 +860,10 @@ print_result_json() {
     --arg ipv6Public "$ipv6_public" \
     --argjson ipv4PublicValues "$ipv4_public_values_json" \
     --argjson ipv6PublicValues "$ipv6_public_values_json" \
+    --argjson ipv4ProviderCount "$IPV4_PROVIDER_COUNT" \
+    --argjson ipv6ProviderCount "$IPV6_PROVIDER_COUNT" \
+    --arg ipv4Status "$IPV4_RESULT_STATUS" \
+    --arg ipv6Status "$IPV6_RESULT_STATUS" \
     '
       {}
       + (
@@ -796,7 +878,9 @@ print_result_json() {
                   ipifyHttps: (if $ipv4Ipify == "" then null else $ipv4Ipify end),
                   localRoute: (if $ipv4LocalRoute == "" then null else $ipv4LocalRoute end)
                 },
-                consistent: ($ipv4PublicValues | length <= 1)
+                providerCount: $ipv4ProviderCount,
+                status: $ipv4Status,
+                consistent: (if $ipv4ProviderCount < 2 then null else $ipv4Status == "consistent" end)
               }
             }
           else
@@ -814,7 +898,9 @@ print_result_json() {
                   ipifyHttps: (if $ipv6Ipify == "" then null else $ipv6Ipify end),
                   localRoute: (if $ipv6LocalRoute == "" then null else $ipv6LocalRoute end)
                 },
-                consistent: ($ipv6PublicValues | length <= 1)
+                providerCount: $ipv6ProviderCount,
+                status: $ipv6Status,
+                consistent: (if $ipv6ProviderCount < 2 then null else $ipv6Status == "consistent" end)
               }
             }
           else
@@ -873,6 +959,10 @@ print_debug_json() {
     --arg ipv6Public "$ipv6_public" \
     --argjson ipv4PublicValues "$ipv4_public_values_json" \
     --argjson ipv6PublicValues "$ipv6_public_values_json" \
+    --argjson ipv4ProviderCount "$IPV4_PROVIDER_COUNT" \
+    --argjson ipv6ProviderCount "$IPV6_PROVIDER_COUNT" \
+    --arg ipv4Status "$IPV4_RESULT_STATUS" \
+    --arg ipv6Status "$IPV6_RESULT_STATUS" \
     --argjson warnings "$warnings_json" \
     '
       {
@@ -918,7 +1008,9 @@ print_debug_json() {
                     status: $ipv4LocalRouteStatus
                   }
                 },
-                consistent: ($ipv4PublicValues | length <= 1)
+                providerCount: $ipv4ProviderCount,
+                status: $ipv4Status,
+                consistent: (if $ipv4ProviderCount < 2 then null else $ipv4Status == "consistent" end)
               }
             }
           else
@@ -948,7 +1040,9 @@ print_debug_json() {
                     status: $ipv6LocalRouteStatus
                   }
                 },
-                consistent: ($ipv6PublicValues | length <= 1)
+                providerCount: $ipv6ProviderCount,
+                status: $ipv6Status,
+                consistent: (if $ipv6ProviderCount < 2 then null else $ipv6Status == "consistent" end)
               }
             }
           else

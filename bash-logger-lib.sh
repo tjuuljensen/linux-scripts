@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# shell-logging.sh
+# bash-logger-lib.sh
 #
 # Purpose:
 #   Small Bash logging helper library for personal shell scripts.
@@ -11,7 +11,7 @@
 #   safe default log-file handling.
 #
 # Usage:
-#   source /path/to/liblog.sh
+#   source /path/to/bash-logger-lib.sh
 #
 #   log_init                         # default log file
 #   log_init "/path/to/script.log"    # explicit log file
@@ -57,11 +57,11 @@
 
 # Refuse POSIX sh/dash early if someone tries to source this from /bin/sh.
 if [ -z "${BASH_VERSION:-}" ]; then
-  printf '%s\n' "ERROR: liblog.sh requires Bash." >&2
+  printf '%s\n' "ERROR: bash-logger-lib.sh requires Bash." >&2
   return 2 2>/dev/null || exit 2
 fi
 
-LIBLOG_VERSION="1.0.0"
+BASH_LOGGER_LIB_VERSION="1.0.0"
 
 # Do not set shell options here.
 # This file is intended to be sourced, and changing set -euo pipefail or IFS
@@ -299,13 +299,13 @@ ERROR() {
   log_error "$@"
 }
 
-liblog_help() {
+bash_logger_lib_help() {
   cat <<USAGE
-liblog.sh ${LIBLOG_VERSION}
+bash-logger-lib.sh ${BASH_LOGGER_LIB_VERSION}
 
 Source this file from a Bash script:
 
-  source /path/to/liblog.sh
+  source /path/to/bash-logger-lib.sh
 
 Basic use:
 
@@ -325,10 +325,10 @@ This file is a library. It should normally be sourced, not executed.
 USAGE
 }
 
-liblog_self_test() {
+bash_logger_lib_self_test() {
   LOG_LEVEL=DEBUG
   LOG_TO_STDERR=1
-  log_init "${TMPDIR:-/tmp}/liblog-self-test.log"
+  log_init "${TMPDIR:-/tmp}/bash-logger-lib-self-test.log"
 
   log_script_entry
   log_info "Info test"
@@ -351,17 +351,17 @@ liblog_self_test() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
     -h|--help|"")
-      liblog_help
+      bash_logger_lib_help
       ;;
     --version)
-      printf 'liblog.sh %s\n' "$LIBLOG_VERSION"
+      printf 'bash-logger-lib.sh %s\n' "$BASH_LOGGER_LIB_VERSION"
       ;;
     --self-test)
-      liblog_self_test
+      bash_logger_lib_self_test
       ;;
     *)
       printf '%s\n' "ERROR: unknown argument: $1" >&2
-      liblog_help >&2
+      bash_logger_lib_help >&2
       exit 2
       ;;
   esac

@@ -15,6 +15,39 @@ Description:
     - MA-S / OUI36 : 36-bit prefix
     - IAB          : 36-bit prefix
 
+Usage:
+  python3 mac-vendor.py 00:1A:2B:33:44:55
+  python3 mac-vendor.py --update
+  python3 mac-vendor.py --offline --show-address 00:1A:2B:33:44:55
+  python3 mac-vendor.py --quiet --json 00-1A-2B
+
+Cache:
+  Shares ieee-mac-vendors.tsv and metadata.json with mac-vendor.sh under
+  $XDG_CACHE_HOME/mac-vendor, or $HOME/.cache/mac-vendor when XDG_CACHE_HOME
+  is unset or empty. --cache-dir overrides this location for either script.
+  Both scripts can read and refresh the same cache.
+
+  The default freshness threshold is seven days, configurable with
+  --max-age-days. Missing, empty, or stale caches are refreshed automatically
+  unless --offline is set. --offline performs no downloads and requires an
+  existing nonempty cache; stale caches are accepted in offline mode.
+
+  --update explicitly refreshes all four IEEE registries. On a terminal,
+  --update without positional addresses exits after refreshing; otherwise,
+  lookup continues using positional addresses or piped input. Empty query
+  input exits 2. Combining --update with --offline is a CLI error (exit 2),
+  detected before any cache access or download.
+
+Output model:
+  Default output includes the vendor, registry, prefix, and MAC flag notes.
+  --show-address adds registry addresses to normal text output.
+  --quiet prints only vendor names (Unknown for unmatched queries) and
+  suppresses download progress messages.
+  --json prints an array of complete lookup results, one per query.
+  Together, --quiet and --json include only the organization field per query,
+  with null for unknown vendors, for example:
+    [{"organization": "Example Vendor"}, {"organization": null}]
+
 Security / privacy note:
   This script performs local lookup against a cached IEEE database. It does not
   submit queried MAC addresses to an online lookup API.
@@ -32,7 +65,7 @@ Version:
   1.0.0
 
 Date:
-  2026-07-02
+  2026-10-15
 """
 
 from __future__ import annotations
@@ -445,7 +478,7 @@ Accepted input formats:
     )
 
     parser.add_argument("addresses", nargs="*", help="MAC address or prefix to look up")
-    parser.add_argument("-s", "--quiet", action="store_true", help="print only the vendor name")
+    parser.add_argument("-s", "--quiet", action="store_true", help="print only the vendor name (with --json: organization only)")
     parser.add_argument("-u", "--update", action="store_true", help="download and refresh the local IEEE cache")
     parser.add_argument("--offline", action="store_true", help="do not download; require an existing cache")
     parser.add_argument("--json", action="store_true", help="print JSON output")
@@ -461,6 +494,9 @@ Accepted input formats:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.update and args.offline:
+        parser.error("--update and --offline cannot be combined")
 
     try:
         cfile = cache_file(args.cache_dir)
@@ -482,7 +518,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         if args.json:
-            print(json.dumps([asdict(result) for result in results], indent=2, ensure_ascii=False))
+            output = [
+                {"organization": result.organization} if args.quiet else asdict(result)
+                for result in results
+            ]
+            print(json.dumps(output, indent=2, ensure_ascii=False))
         else:
             for result in results:
                 print_result(result, quiet=args.quiet, show_address=args.show_address)
