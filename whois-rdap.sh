@@ -18,7 +18,7 @@
 #   screenshotting, web crawling, or infrastructure clustering.
 #
 # Requirements:
-#   bash, whois, curl, jq, python3, grep, awk, sed, sort, date
+#   bash, whois, curl, jq, ipcalc, grep, awk, sed, sort, date
 #
 # Version:
 #   1.5.0
@@ -80,6 +80,7 @@ WHOIS_LAST_TEXT=""
 WHOIS_LAST_SUCCESS=0
 WHOIS_REFERRAL_COUNT=0
 WHOIS_KRNIC_COLLECTED=0
+WHOIS_JPNIC_COLLECTED=0
 declare -A WHOIS_QUERIED_SERVERS=()
 RDAP_STATUS="not_run"
 RDAP_ERROR=""
@@ -375,7 +376,7 @@ parse_args() {
 }
 
 check_requirements() {
-  require_command python3
+  require_command ipcalc
   require_command jq
   require_command grep
   require_command awk
@@ -393,84 +394,85 @@ check_requirements() {
 }
 
 normalize_target() {
-  local result
+  local raw authority host port label rest
 
-  result="$(
-    python3 - "$TARGET" 2>&1 <<'PY'
-import ipaddress
-import re
-import sys
-from urllib.parse import urlparse
+  command_exists ipcalc || die "Required command not found: ipcalc"
+  raw="${TARGET#"${TARGET%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  [[ -n "$raw" ]] || { err "empty target"; exit 2; }
 
-raw = sys.argv[1].strip()
+  if [[ "$raw" != *"://"* && "$raw" != \[* && "$raw" != */* ]] && ipcalc --check --silent "$raw"; then
+    TARGET_TYPE="ip"
+    NORMALIZED_TARGET="$(ipcalc --address --format=value "$raw")"
+    verbose "Target type: $TARGET_TYPE"
+    verbose "Normalized target: $NORMALIZED_TARGET"
+    return 0
+  fi
 
-if not raw:
-    raise SystemExit("empty target")
+  if [[ "$raw" == *"://"* ]]; then
+    authority="${raw#*://}"
+    authority="${authority%%[/?#]*}"
+  else
+    authority="${raw%%[/?#]*}"
+  fi
+  authority="${authority##*@}"
+  [[ -n "$authority" ]] || { err "could not extract target"; exit 2; }
 
-candidate = raw
+  port=""
+  if [[ "$authority" == \[* ]]; then
+    if [[ "$authority" =~ ^\[([^]]+)\](:([0-9]+))?$ ]]; then
+      host="${BASH_REMATCH[1]}"
+      port="${BASH_REMATCH[3]:-}"
+    else
+      err "malformed IP address: $raw"
+      exit 2
+    fi
+  elif [[ "$authority" == *:* ]]; then
+    host="${authority%%:*}"
+    port="${authority#*:}"
+    if [[ "$port" == *:* || ! "$port" =~ ^[0-9]+$ ]]; then
+      err "malformed IP address: $raw"
+      exit 2
+    fi
+  else
+    host="$authority"
+  fi
+  if [[ -n "$port" ]]; then
+    while [[ "$port" == 0* && "$port" != 0 ]]; do port="${port#0}"; done
+    if [[ "${#port}" -gt 5 ]] || (( 10#$port > 65535 )); then
+      err "malformed IP address: $raw"
+      exit 2
+    fi
+  fi
 
-try:
-    if "://" in candidate:
-        parsed = urlparse(candidate)
-        candidate = parsed.hostname or ""
-        _ = parsed.port
-    elif candidate.startswith("["):
-        parsed = urlparse("//" + candidate)
-        candidate = parsed.hostname or ""
-        _ = parsed.port
-    else:
-        try:
-            ip = ipaddress.ip_address(candidate)
-        except ValueError:
-            # A bare address with multiple colons cannot be a domain or host:port.
-            if candidate.count(":") >= 2:
-                raise SystemExit(f"malformed IP address: {raw}")
-            parsed = urlparse("//" + candidate)
-            candidate = parsed.hostname or candidate
-            _ = parsed.port
-        else:
-            print(f"ip\t{ip.compressed}")
-            raise SystemExit(0)
-except ValueError:
-    raise SystemExit(f"malformed IP address: {raw}") from None
-
-candidate = candidate.strip().lower()
-
-if not candidate:
-    raise SystemExit("could not extract target")
-
-try:
-    ip = ipaddress.ip_address(candidate)
-    print(f"ip\t{ip.compressed}")
-    raise SystemExit(0)
-except ValueError:
-    pass
-
-if re.fullmatch(r"[0-9.]+", candidate) or ":" in candidate:
-    raise SystemExit(f"malformed IP address: {raw}")
-
-candidate = candidate.rstrip(".")
-
-if not re.fullmatch(r"[a-z0-9.-]+", candidate):
-    raise SystemExit(f"unsupported target syntax: {raw}")
-
-if ".." in candidate or "." not in candidate:
-    raise SystemExit(f"target does not look like a domain or IP: {raw}")
-
-labels = candidate.split(".")
-
-if any(not label or len(label) > 63 for label in labels):
-    raise SystemExit(f"invalid domain label in target: {raw}")
-
-print(f"domain\t{candidate}")
-PY
-  )" || {
-    err "$result"
-    exit 2
-  }
-
-  TARGET_TYPE="${result%%$'\t'*}"
-  NORMALIZED_TARGET="${result#*$'\t'}"
+  host="${host,,}"
+  if [[ "$host" != */* ]] && ipcalc --check --silent "$host"; then
+    TARGET_TYPE="ip"
+    NORMALIZED_TARGET="$(ipcalc --address --format=value "$host")"
+  else
+    if [[ "$host" =~ ^[0-9.]+$ || "$host" == *:* ]]; then
+      err "malformed IP address: $raw"
+      exit 2
+    fi
+    host="${host%.}"
+    if [[ ! "$host" =~ ^[a-z0-9.-]+$ ]]; then
+      err "unsupported target syntax: $raw"
+      exit 2
+    fi
+    if [[ "$host" != *.* || "$host" == *..* ]]; then
+      err "target does not look like a domain or IP: $raw"
+      exit 2
+    fi
+    rest="$host"
+    while [[ "$rest" == *.* ]]; do
+      label="${rest%%.*}"
+      [[ -n "$label" && "${#label}" -le 63 ]] || { err "invalid domain label in target: $raw"; exit 2; }
+      rest="${rest#*.}"
+    done
+    [[ -n "$rest" && "${#rest}" -le 63 ]] || { err "invalid domain label in target: $raw"; exit 2; }
+    TARGET_TYPE="domain"
+    NORMALIZED_TARGET="$host"
+  fi
 
   verbose "Target type: $TARGET_TYPE"
   verbose "Normalized target: $NORMALIZED_TARGET"
@@ -487,37 +489,18 @@ detect_base_domain() {
     return 0
   fi
 
-  BASE_DOMAIN="$(
-    python3 - "$NORMALIZED_TARGET" <<'PY'
-import sys
-
-domain = sys.argv[1].strip(".").lower()
-labels = domain.split(".")
-
-# Lightweight heuristic only. This is not a full public-suffix-list parser.
-common_two_label_suffixes = {
-    "co.uk", "org.uk", "ac.uk", "gov.uk",
-    "com.au", "net.au", "org.au",
-    "co.nz", "org.nz",
-    "com.br", "com.mx",
-    "co.jp", "ne.jp", "or.jp",
-    "co.kr", "or.kr",
-    "com.tr",
-}
-
-if len(labels) < 2:
-    print(domain)
-    raise SystemExit(0)
-
-last_two = ".".join(labels[-2:])
-last_three = ".".join(labels[-3:])
-
-if len(labels) >= 3 and last_two in common_two_label_suffixes:
-    print(last_three)
-else:
-    print(last_two)
-PY
-  )"
+  local suffix parent
+  suffix="${NORMALIZED_TARGET#${NORMALIZED_TARGET%.*}.}"
+  parent="${NORMALIZED_TARGET%.*}"
+  BASE_DOMAIN="${parent##*.}.${suffix}"
+  case "$BASE_DOMAIN" in
+    co.uk|org.uk|ac.uk|gov.uk|com.au|net.au|org.au|co.nz|org.nz|com.br|com.mx|co.jp|ne.jp|or.jp|co.kr|or.kr|com.tr)
+      if [[ "$parent" == *.* ]]; then
+        parent="${parent%.*}"
+        BASE_DOMAIN="${parent##*.}.${BASE_DOMAIN}"
+      fi
+      ;;
+  esac
 
   if [[ "$BASE_DOMAIN" != "$NORMALIZED_TARGET" && "$NO_HINTS" -eq 0 && "$QUIET" -eq 0 ]]; then
     warn "Using heuristic base domain: $BASE_DOMAIN"
@@ -528,14 +511,9 @@ PY
 }
 
 safe_filename() {
-  python3 - "$1" <<'PY'
-import re
-import sys
-
-raw = sys.argv[1]
-safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("_")
-print(safe or "target")
-PY
+  local safe
+  safe="$(printf '%s' "$1" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^_+//; s/_+$//')"
+  printf '%s\n' "${safe:-target}"
 }
 
 timestamp_utc() {
@@ -621,6 +599,9 @@ perform_whois_lookup() {
     if [[ "$WHOIS_LAST_TEXT" == *"- KISA/KRNIC WHOIS Service -"* ]]; then
       WHOIS_KRNIC_COLLECTED=1
     fi
+    if [[ "$WHOIS_LAST_TEXT" == *"JPNIC database provides information"* && "$WHOIS_LAST_TEXT" == *"[Network Number]"* ]]; then
+      WHOIS_JPNIC_COLLECTED=1
+    fi
   else
     WHOIS_FAILURE_COUNT=$((WHOIS_FAILURE_COUNT + 1))
     detail="${WHOIS_LAST_TEXT%%$'\n'*}"
@@ -668,55 +649,56 @@ extract_whois_ip_referral_server() {
   candidate="$(
     printf '%s\n' "$response" |
       awk '
+        BEGIN { jpnic_banner=0; jpnic_english=0; found=0 }
         {
           line = tolower($0)
+          if (line ~ /jpnic database provides information/) jpnic_banner=1
+          if (line ~ /\[network number\]/) jpnic_english=1
           if (line ~ /^[[:space:]]*(refer|whois|whois server|referralserver):[[:space:]]*/) {
             sub(/^[^:]+:[[:space:]]*/, "", $0)
             split($0, parts, /[[:space:]]+/)
             print parts[1]
+            found=1
             exit
           }
-          if (line ~ /^remarks:[[:space:]]*(krnic )?whois server at[[:space:]]+/) {
+          if (line ~ /^remarks:[[:space:]]*(krnic|twnic) whois server at[[:space:]]+/) {
             sub(/^.*[[:space:]]at[[:space:]]+/, "", $0)
             split($0, parts, /[[:space:]]+/)
             print parts[1]
+            found=1
             exit
           }
+          if (line ~ /^remarks:.*whois\.nic\.ad\.jp/) {
+            print "whois.nic.ad.jp"
+            found=1
+            exit
+          }
+        }
+        END {
+          if (!found && jpnic_banner && !jpnic_english) print "whois.nic.ad.jp"
         }
       '
   )"
 
   [[ -n "$candidate" ]] || return 0
 
-  python3 - "$candidate" <<'PY'
-import ipaddress
-import re
-import sys
-
-host = sys.argv[1].strip().lower()
-if host.startswith("whois://"):
-    host = host[8:]
-host = host.rstrip(".")
-if host.endswith(":43"):
-    host = host[:-3]
-
-if len(host) > 253 or not re.fullmatch(r"[a-z0-9.-]+", host):
-    raise SystemExit(1)
-labels = host.split(".")
-if len(labels) < 2 or any(
-    not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
-    for label in labels
-):
-    raise SystemExit(1)
-if host.endswith((".local", ".internal", ".test", ".invalid", ".example")):
-    raise SystemExit(1)
-try:
-    ipaddress.ip_address(host)
-except ValueError:
-    print(host)
-else:
-    raise SystemExit(1)
-PY
+  candidate="${candidate,,}"
+  candidate="${candidate#whois://}"
+  candidate="${candidate%.}"
+  candidate="${candidate%:43}"
+  [[ "${#candidate}" -le 253 && "$candidate" =~ ^[a-z0-9.-]+$ && "$candidate" == *.* ]] || return 1
+  case "$candidate" in
+    *.local|*.internal|*.test|*.invalid|*.example) return 1 ;;
+  esac
+  if ipcalc --check --silent "$candidate"; then return 1; fi
+  local label rest="$candidate"
+  while [[ "$rest" == *.* ]]; do
+    label="${rest%%.*}"
+    [[ -n "$label" && "${#label}" -le 63 && "$label" != -* && "$label" != *- ]] || return 1
+    rest="${rest#*.}"
+  done
+  [[ -n "$rest" && "${#rest}" -le 63 && "$rest" != -* && "$rest" != *- ]] || return 1
+  printf '%s\n' "$candidate"
 }
 
 follow_whois_ip_referrals() {
@@ -741,13 +723,25 @@ follow_whois_ip_referrals() {
       verbose "Skipping KRNIC referral; authoritative KRNIC data is already collected."
       break
     fi
+    if [[ "$WHOIS_JPNIC_COLLECTED" -eq 1 && "$referral" == "whois.nic.ad.jp" ]]; then
+      verbose "Skipping JPNIC referral; authoritative JPNIC data is already collected."
+      break
+    fi
 
     WHOIS_QUERIED_SERVERS["$referral"]=1
     depth=$((depth + 1))
     WHOIS_REFERRAL_COUNT=$((WHOIS_REFERRAL_COUNT + 1))
     log "Following IP WHOIS referral ${depth}/${MAX_REFERRALS}: $referral"
 
-    perform_whois_lookup -h "$referral" "$ip"
+    if [[ "$referral" == "whois.nic.ad.jp" ]]; then
+      perform_whois_lookup -h "$referral" "${ip}/e"
+    else
+      perform_whois_lookup -h "$referral" "$ip"
+    fi
+    if [[ "$WHOIS_LAST_SUCCESS" -eq 1 && "$WHOIS_LAST_TEXT" == "$response" ]]; then
+      verbose "WHOIS referral returned the same record: $referral"
+      break
+    fi
     response="$WHOIS_LAST_TEXT"
     WHOIS_TEXT+=$'\n'
     WHOIS_TEXT+="===== WHOIS referral: ${referral} ====="
@@ -1050,45 +1044,184 @@ whois_field_all_unique() {
     sort -u
 }
 
-whois_ip_network_types() {
-  # Report classifications only from the smallest matching WHOIS range.
-  # A broader allocation's type does not describe a more specific assignment.
-  python3 -c '
-import ipaddress
-import re
-import sys
+whois_jpnic_field_all_unique() {
+  local label="$1"
 
-target = ipaddress.ip_address(sys.argv[1])
-range_pattern = re.compile(r"^(?:IPv[46] Address|NetRange|inetnum|inet6num)\s*:\s*(\S+)\s*-\s*(\S+)", re.I)
-type_pattern = re.compile(r"^Network Type\s*:\s*(\S(?:.*\S)?)\s*$", re.I)
-records = []
-current = None
+  printf '%s\n' "$WHOIS_TEXT" |
+    awk -v label="$label" '
+      /^[[:alpha:]]\.[[:space:]]*\[/ && index(tolower($0), "[" tolower(label) "]") {
+        sub(/^[[:alpha:]]\.[[:space:]]*\[[^]]+\][[:space:]]*/, "", $0)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        if ($0 != "") print
+      }
+    ' |
+    sort -u
+}
 
-for line in sys.stdin:
-    if line.startswith("===== WHOIS"):
-        current = None
-        continue
-    match = range_pattern.match(line)
-    if match:
-        try:
-            start, end = (ipaddress.ip_address(value) for value in match.groups())
-        except ValueError:
-            current = None
-            continue
-        current = None
-        if start.version == target.version and start <= target <= end:
-            current = [int(end) - int(start), None]
-            records.append(current)
-        continue
-    match = type_pattern.match(line)
-    if current is not None and match:
-        current[1] = match.group(1)
-
-if records:
-    smallest = min(record[0] for record in records)
-    for value in sorted({kind for size, kind in records if size == smallest and kind}):
-        print(value)
-' "$NORMALIZED_TARGET" <<< "$WHOIS_TEXT"
+whois_ip_selected_fields() {
+  # Compare fixed-width hexadecimal addresses so IPv6 ranges do not depend on
+  # the shell or awk having 128-bit integer arithmetic.
+  awk -v target="$NORMALIZED_TARGET" '
+    function v4hex(ip, octets, n, i, result) {
+      n = split(ip, octets, /\./)
+      if (n != 4) return ""
+      result = ""
+      for (i = 1; i <= 4; i++) {
+        if (octets[i] !~ /^[0-9]+$/ || octets[i] + 0 > 255) return ""
+        result = result sprintf("%02x", octets[i] + 0)
+      }
+      return result
+    }
+    function grouphex(group) {
+      if (group !~ /^[0-9a-f]+$/ || length(group) < 1 || length(group) > 4) return ""
+      return substr("0000" group, length(group) + 1)
+    }
+    function iphex(ip, parts, left, right, nleft, nright, missing, i, group, result, tail) {
+      ip = tolower(ip)
+      if (index(ip, ":") == 0) return v4hex(ip)
+      if (index(ip, ".")) {
+        nleft = split(ip, parts, ":")
+        tail = v4hex(parts[nleft])
+        if (tail == "") return ""
+        sub(/[^:]+$/, substr(tail, 1, 4) ":" substr(tail, 5, 4), ip)
+      }
+      result = ""
+      if (index(ip, "::")) {
+        i = index(ip, "::")
+        left = substr(ip, 1, i - 1)
+        right = substr(ip, i + 2)
+        nleft = left == "" ? 0 : split(left, parts, ":")
+        for (i = 1; i <= nleft; i++) {
+          group = grouphex(parts[i])
+          if (group == "") return ""
+          result = result group
+        }
+        nright = right == "" ? 0 : split(right, parts, ":")
+        missing = 8 - nleft - nright
+        if (missing < 1) return ""
+        for (i = 1; i <= missing; i++) result = result "0000"
+        for (i = 1; i <= nright; i++) {
+          group = grouphex(parts[i])
+          if (group == "") return ""
+          result = result group
+        }
+      } else {
+        if (split(ip, parts, ":") != 8) return ""
+        for (i = 1; i <= 8; i++) {
+          group = grouphex(parts[i])
+          if (group == "") return ""
+          result = result group
+        }
+      }
+      return result
+    }
+    function nibble(char) { return index("0123456789abcdef", char) - 1 }
+    function hexwidth(start, end, i, digit, borrow, result) {
+      borrow = 0
+      result = ""
+      for (i = length(start); i >= 1; i--) {
+        digit = nibble(substr(end, i, 1)) - nibble(substr(start, i, 1)) - borrow
+        if (digit < 0) { digit += 16; borrow = 1 } else borrow = 0
+        result = substr("0123456789abcdef", digit + 1, 1) result
+      }
+      return result
+    }
+    function range_bounds(raw, parts, count, prefix, base, total, i, keep, block, digit, low, high) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", raw)
+      sub(/[[:space:]]*\([^)]+\).*$/, "", raw)
+      BSTART = BEND = ""
+      if (index(raw, "-")) {
+        count = split(raw, parts, /[[:space:]]*-[[:space:]]*/)
+        if (count != 2) return 0
+        BSTART = iphex(parts[1])
+        BEND = iphex(parts[2])
+      } else if (index(raw, "/")) {
+        count = split(raw, parts, "/")
+        if (count != 2 || parts[2] !~ /^[0-9]+$/) return 0
+        base = iphex(parts[1])
+        total = length(base) * 4
+        prefix = parts[2] + 0
+        if (base == "" || prefix > total) return 0
+        for (i = 1; i <= length(base); i++) {
+          digit = nibble(substr(base, i, 1))
+          keep = prefix - (i - 1) * 4
+          if (keep >= 4) { low = high = digit }
+          else if (keep <= 0) { low = 0; high = 15 }
+          else {
+            block = 2 ^ (4 - keep)
+            low = int(digit / block) * block
+            high = low + block - 1
+          }
+          BSTART = BSTART substr("0123456789abcdef", low + 1, 1)
+          BEND = BEND substr("0123456789abcdef", high + 1, 1)
+        }
+      } else BSTART = BEND = iphex(raw)
+      return BSTART != "" && length(BSTART) == length(BEND) && ("x" BSTART <= "x" BEND)
+    }
+    function clear_current() {
+      current_match = current_rpsl = 0
+      current_name = current_org = current_descr = current_status = current_note = current_type = ""
+    }
+    function commit( org) {
+      if (!current_match) { clear_current(); return }
+      if (current_rpsl && (best_rpsl_width == "" || ("x" current_width <= "x" best_rpsl_width))) {
+        if (best_rpsl_width == "" || ("x" current_width < "x" best_rpsl_width))
+          best_name = best_org = best_status = best_note = ""
+        best_rpsl_width = current_width
+        org = current_org != "" ? current_org : current_descr
+        if (current_name != "") best_name = current_name
+        if (org != "") best_org = org
+        if (current_status != "") best_status = current_status
+        if (current_note != "") best_note = current_note
+      }
+      if (best_type_width == "" || ("x" current_width < "x" best_type_width)) {
+        delete types
+        best_type_width = current_width
+      }
+      if (current_width == best_type_width && current_type != "") types[current_type] = 1
+      clear_current()
+    }
+    BEGIN { targethex = iphex(target); clear_current() }
+    /^===== WHOIS/ { commit(); next }
+    /^[[:space:]]*$/ { if (current_rpsl) commit(); next }
+    {
+      colon = index($0, ":")
+      if (!colon) next
+      key = tolower(substr($0, 1, colon - 1))
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+      value = substr($0, colon + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/[[:cntrl:]]/, " ", value)
+      if (key ~ /^(ipv[46] address|netrange|inetnum|inet6num)$/) {
+        commit()
+        if (range_bounds(value) && length(BSTART) == length(targethex) &&
+            ("x" BSTART <= "x" targethex) && ("x" targethex <= "x" BEND)) {
+          current_match = 1
+          current_rpsl = key ~ /^(inetnum|inet6num)$/
+          current_width = hexwidth(BSTART, BEND)
+        }
+        next
+      }
+      if (!current_match) next
+      if (key == "network type") current_type = value
+      if (!current_rpsl) next
+      if (key == "netname") current_name = value
+      else if ((key == "org-name" || key == "orgname" || key == "owner") && current_org == "") current_org = value
+      else if (key == "descr" && current_descr == "") current_descr = value
+      else if (key == "status" && current_status == "") current_status = value
+      else if (key == "remarks" && current_note == "" && length(value) <= 120 &&
+               tolower(value) !~ /whois|mirrored|more specific information/ &&
+               value !~ /^\([^)]*\)$/) current_note = value
+    }
+    END {
+      commit()
+      if (best_name != "") print "name\t" best_name
+      if (best_org != "") print "organization\t" best_org
+      if (best_status != "") print "status\t" best_status
+      if (best_note != "") print "note\t" best_note
+      for (kind in types) print "type\t" kind
+    }
+  ' <<< "$WHOIS_TEXT"
 }
 
 rdap_jq_first() {
@@ -1128,6 +1261,12 @@ print_text_summary() {
   local ip_org_values=""
   local ip_networks=""
   local ip_network_types=""
+  local ip_rpsl_name=""
+  local ip_rpsl_org=""
+  local ip_rpsl_status=""
+  local ip_rpsl_note=""
+  local ip_field=""
+  local ip_value=""
   local ip_country=""
   local abuse_email=""
   local contact_email=""
@@ -1143,17 +1282,44 @@ print_text_summary() {
   status_values="$(whois_field_all_unique '^(Domain Status|Status|state):')"
   nameservers="$(whois_field_all_unique '^(Name Server|Nameserver|nserver):')"
 
-  ip_name="$(whois_field_first '^(Service Name|NetName|Network Name)[[:space:]]*:')"
-  ip_org_values="$(whois_field_all_unique '^Organization Name[[:space:]]*:')"
+  if [[ "$TARGET_TYPE" == "ip" && "$WHOIS_SUCCESS_COUNT" -gt 0 ]]; then
+    while IFS=$'\t' read -r ip_field ip_value; do
+      case "$ip_field" in
+        name) ip_rpsl_name="$ip_value" ;;
+        organization) ip_rpsl_org="$ip_value" ;;
+        status) ip_rpsl_status="$ip_value" ;;
+        note) ip_rpsl_note="$ip_value" ;;
+        type) ip_network_types+="${ip_value}"$'\n' ;;
+      esac
+    done < <(whois_ip_selected_fields)
+    if [[ -n "$ip_network_types" ]]; then
+      ip_network_types="$(sort -u <<< "$ip_network_types" | sed '/^$/d')"
+    fi
+  fi
+
+  ip_name="$(whois_jpnic_field_all_unique 'Network Name' | awk 'NR == 1 { print }')"
+  if [[ "$TARGET_TYPE" == "ip" && -z "$ip_name" ]]; then
+    ip_name="$ip_rpsl_name"
+  fi
+  if [[ -z "$ip_name" ]]; then
+    ip_name="$(whois_field_first '^(Service Name|NetName|Network Name)[[:space:]]*:')"
+  fi
+  ip_org_values="$(whois_jpnic_field_all_unique 'Organization')"
+  if [[ -z "$ip_org_values" ]]; then
+    ip_org_values="$(whois_field_all_unique '^Organization Name[[:space:]]*:')"
+  fi
+  if [[ "$TARGET_TYPE" == "ip" && -z "$ip_org_values" ]]; then
+    ip_org_values="$ip_rpsl_org"
+  fi
   if [[ -z "$ip_org_values" ]]; then
     ip_org_values="$(whois_field_all_unique '^(OrgName|org-name|descr|owner)[[:space:]]*:')"
   fi
-  ip_networks="$(whois_field_all_unique '^IPv[46] Address[[:space:]]*:')"
+  ip_networks="$(whois_jpnic_field_all_unique 'Network Number')"
+  if [[ -z "$ip_networks" ]]; then
+    ip_networks="$(whois_field_all_unique '^IPv[46] Address[[:space:]]*:')"
+  fi
   if [[ -z "$ip_networks" ]]; then
     ip_networks="$(whois_field_all_unique '^(NetRange|inetnum|inet6num|CIDR)[[:space:]]*:')"
-  fi
-  if [[ "$TARGET_TYPE" == "ip" && "$WHOIS_SUCCESS_COUNT" -gt 0 ]]; then
-    ip_network_types="$(whois_ip_network_types)"
   fi
   ip_country="$(whois_field_first '^(Country|country):')"
   abuse_email="$(whois_field_first '^(OrgAbuseEmail|abuse-mailbox)[[:space:]]*:')"
@@ -1275,6 +1441,8 @@ print_text_summary() {
         printf '  Network type:   %s\n' "$ip_network_types"
       fi
     fi
+    [[ -n "$ip_rpsl_status" ]] && printf '  WHOIS status:   %s\n' "$ip_rpsl_status"
+    [[ -n "$ip_rpsl_note" ]] && printf '  Network note:   %s\n' "$ip_rpsl_note"
     if [[ -n "$ip_org_values" ]]; then
       printf '  Organizations:\n'
       sed 's/^/    - /' <<< "$ip_org_values"

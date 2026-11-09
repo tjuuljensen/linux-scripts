@@ -110,6 +110,14 @@ bash mac-vendor.sh --json 00:11:22:33:44:55
 - `whatismyip.sh` — compare public IPv4/IPv6 addresses from multiple providers.
 - `whois-rdap.sh` — gather WHOIS and RDAP registration data for domains and IP addresses.
 
+For IPs, `whois-rdap.sh` follows explicit WHOIS registry pointers, including
+KRNIC, JPNIC (using English output), and TWNIC. Its text output stays concise
+and takes network classification and RPSL organization details from the most
+specific matching record. Use `--raw` or `--save` for complete responses.
+
+On Fedora, install its CLI dependencies with
+`sudo dnf install whois curl jq ipcalc`.
+
 ## MAC vendor lookup in Bash
 
 `mac-vendor.sh` requires Bash 4+, `awk`, standard Unix utilities (including

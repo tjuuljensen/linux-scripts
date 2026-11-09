@@ -39,6 +39,60 @@ remarks: KRNIC. To obtain more specific information, please use the
 remarks: KRNIC whois server at whois.kisa.or.kr.
 """
 
+JPNIC = """[ JPNIC database provides information regarding IP address and ASN. ]
+Network Information:
+a. [Network Number]             203.179.0.0/20
+b. [Network Name]               KCT-NET
+g. [Organization]               Kurashiki Cable TV Corporation
+m. [Administrative Contact]     JP00027229
+n. [Technical Contact]          JP00027229
+Less Specific Info.
+----------
+Kurashiki Cable TV Corporation
+                     [Allocation] 203.179.0.0/20
+"""
+
+APNIC_JP = """% [whois.apnic.net]
+inetnum: 203.178.0.0 - 203.183.255.255
+netname: JPNIC-NET-JP
+descr: Japan Network Information Center
+remarks: Authoritative information can be queried at whois.nic.ad.jp.
+inetnum: 203.179.0.0 - 203.179.15.255
+netname: KCT-NET
+remarks: This information has been partially mirrored by APNIC from
+remarks: JPNIC. To obtain more specific information, please use the
+remarks: whois.nic.ad.jp for WHOIS client. Use /e for English output.
+"""
+
+TWNIC_APNIC = """% [whois.apnic.net]
+inetnum: 111.240.0.0 - 111.255.255.255
+netname: HINET-NET
+descr: Chunghwa Telecom
+descr: No.21, Sec.1, Xinyi Rd., Taipei City
+status: ALLOCATED PORTABLE
+inetnum: 111.249.0.0 - 111.249.255.255
+netname: HINET-NET
+descr: Chunghwa Telecom Data Communication Business Group
+descr: No.21, Hsin-Yi Rd., sec. 1
+status: ASSIGNED NON-PORTABLE
+remarks: Residential ADSL/FTTB
+remarks: This information has been partially mirrored by APNIC from
+remarks: TWNIC. To obtain more specific information, please use the
+remarks: TWNIC whois server at whois.twnic.net.
+"""
+
+IPV6_WHOIS = """inet6num: 2001:db8::/32
+netname: PARENT-V6
+descr: Parent Registry
+status: ALLOCATED-BY-RIR
+inet6num: 2001:db8:abcd:: - 2001:db8:abcd:ffff:ffff:ffff:ffff:ffff
+netname: CHILD-V6
+descr: Child Network
+status: ASSIGNED
+remarks: Residential fiber
+Network Type: CUSTOMER
+"""
+
 RDAP = {
     "objectClassName": "ip network",
     "name": "KORNET-KR",
@@ -85,7 +139,7 @@ if not host and mode == 'fail':
     sys.exit(7)
 if not host and mode == 'empty':
     sys.exit(0)
-if host == 'whois.kisa.or.kr' and os.environ.get('TEST_REFERRAL_FAIL') == '1':
+if host and os.environ.get('TEST_REFERRAL_FAIL') == '1':
     print('simulated referral failure', file=sys.stderr)
     sys.exit(7)
 if mode == 'chain':
@@ -97,6 +151,21 @@ if mode == 'chain':
         print('refer: whois.alpha.net')
 elif mode == 'invalid' and not host:
     print('refer: whois://127.0.0.1')
+elif host == 'whois.nic.ad.jp':
+    print(os.environ['TEST_JPNIC'])
+elif host == 'whois.twnic.net':
+    print(os.environ.get('TEST_TWNIC_REFERRAL', os.environ['TEST_TWNIC']))
+elif not host and mode == 'twnic':
+    print(os.environ['TEST_TWNIC'])
+elif not host and mode == 'jpnic':
+    print(os.environ['TEST_JPNIC'])
+elif not host and mode == 'jpnic_japanese':
+    print('[ JPNIC database provides information regarding IP address and ASN. ]')
+    print('a. [ネットワーク番号] 203.179.0.0/20')
+elif not host and mode == 'apnic_jp':
+    print(os.environ['TEST_APNIC_JP'])
+elif not host and mode == 'ipv6':
+    print(os.environ['TEST_IPV6'])
 elif host == 'whois.apnic.net' or (not host and mode == 'apnic'):
     print(os.environ['TEST_APNIC'])
 elif host == 'whois.kisa.or.kr' or not host:
@@ -135,6 +204,10 @@ class WhoisRdapTests(unittest.TestCase):
             TEST_CALLS=str(self.calls),
             TEST_KRNIC=KRNIC,
             TEST_APNIC=APNIC,
+            TEST_JPNIC=JPNIC,
+            TEST_APNIC_JP=APNIC_JP,
+            TEST_TWNIC=TWNIC_APNIC,
+            TEST_IPV6=IPV6_WHOIS,
             TEST_RDAP=json.dumps(RDAP),
             PYTHONDONTWRITEBYTECODE="1",
             LC_ALL="C.UTF-8",
@@ -155,6 +228,7 @@ class WhoisRdapTests(unittest.TestCase):
             "2001:db8::gg", "[2001:db8::gg]",
             "[2001:db8::1]junk", "211.46.181.148:abc",
             "https://211.46.181.999/path", "https://[2001:db8::gg]/",
+            "https://[2001:db8::1]:70000/", "2001:db8:::1",
         )
         for index, target in enumerate(invalid):
             with self.subTest(target=target):
@@ -174,7 +248,10 @@ class WhoisRdapTests(unittest.TestCase):
             ("[2001:db8::1]", "ip", "2001:db8::1"),
             ("https://[2001:db8::1]/path", "ip", "2001:db8::1"),
             ("https://211.46.181.148/path", "ip", "211.46.181.148"),
+            ("https://[2001:0db8::1]:443/path", "ip", "2001:db8::1"),
+            ("211.46.181.148:443", "ip", "211.46.181.148"),
             ("www.example.com", "domain", "www.example.com"),
+            ("www.example.co.uk:443", "domain", "www.example.co.uk"),
         )
         for target, kind, normalized in cases:
             with self.subTest(target=target):
@@ -183,6 +260,8 @@ class WhoisRdapTests(unittest.TestCase):
                 data = json.loads(result.stdout)
                 self.assertEqual(data["target"]["type"], kind)
                 self.assertEqual(data["target"]["normalized"], normalized)
+                if normalized == "www.example.co.uk":
+                    self.assertEqual(data["target"]["baseDomain"], "example.co.uk")
                 self.assertEqual(self.call_lines(), [])
 
     def test_ip_text_is_useful_summary_without_refetching_krnic(self):
@@ -309,6 +388,136 @@ class WhoisRdapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.call_lines()), 6)
         self.assertFalse(any("-h whois.kisa.or.kr" in line for line in self.call_lines()))
+
+    def test_jpnic_default_english_record_needs_no_referral(self):
+        result = self.run_script(
+            "--no-rdap", "--no-hints", "203.179.0.1", TEST_DEFAULT="jpnic",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Network name:   KCT-NET", result.stdout)
+        self.assertIn("203.179.0.0/20", result.stdout)
+        self.assertIn("Kurashiki Cable TV Corporation", result.stdout)
+        self.assertNotIn("Raw WHOIS", result.stdout)
+        self.assertEqual(self.call_lines(), ["whois 203.179.0.1"])
+
+    def test_apnic_jp_referral_uses_english_and_specific_record(self):
+        result = self.run_script(
+            "--no-rdap", "--no-hints", "203.179.0.1", TEST_DEFAULT="apnic_jp",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Network name:   KCT-NET", result.stdout)
+        self.assertIn("203.179.0.0/20", result.stdout)
+        self.assertIn("Kurashiki Cable TV Corporation", result.stdout)
+        self.assertNotIn("Japan Network Information Center", result.stdout)
+        self.assertEqual(self.call_lines(), [
+            "whois 203.179.0.1",
+            "whois -h whois.nic.ad.jp 203.179.0.1/e",
+        ])
+
+        japanese = self.run_script(
+            "--no-rdap", "203.179.0.1", TEST_DEFAULT="jpnic_japanese",
+        )
+        self.assertEqual(japanese.returncode, 0, japanese.stderr)
+        self.assertIn("Network name:   KCT-NET", japanese.stdout)
+        self.assertEqual(self.call_lines(), [
+            "whois 203.179.0.1",
+            "whois -h whois.nic.ad.jp 203.179.0.1/e",
+        ])
+
+        limited = self.run_script(
+            "--max-referrals", "0", "--no-rdap", "203.179.0.1",
+            TEST_DEFAULT="apnic_jp",
+        )
+        self.assertEqual(limited.returncode, 0, limited.stderr)
+        self.assertEqual(self.call_lines(), ["whois 203.179.0.1"])
+
+    def test_rir_all_does_not_requery_jpnic(self):
+        result = self.run_script(
+            "--rir-all", "--no-rdap", "203.179.0.1", TEST_DEFAULT="jpnic",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any("-h whois.nic.ad.jp" in line for line in self.call_lines()))
+
+    def test_twnic_pointer_deduplicates_mirrored_response(self):
+        saved = self.base / "twnic-saved"
+        result = self.run_script(
+            "--format", "json", "--no-rdap", "--save", "--output-dir",
+            str(saved), "111.249.0.1", TEST_DEFAULT="twnic",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["collection"]["whois"], "collected")
+        self.assertEqual(self.call_lines(), [
+            "whois 111.249.0.1",
+            "whois -h whois.twnic.net 111.249.0.1",
+        ])
+        self.assertEqual(len(data["collection"]["whoisFiles"]), 1)
+        self.assertNotIn("WHOIS referral:", data["data"]["whoisRaw"])
+
+        summary = self.run_script(
+            "--no-rdap", "--no-hints", "111.249.0.1", TEST_DEFAULT="twnic",
+        )
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertIn("WHOIS status:   ASSIGNED NON-PORTABLE", summary.stdout)
+        self.assertIn("Network note:   Residential ADSL/FTTB", summary.stdout)
+
+        self.assertIn("Chunghwa Telecom Data Communication Business Group", summary.stdout)
+        self.assertNotIn("No.21", summary.stdout)
+        self.assertNotIn("ALLOCATED PORTABLE", summary.stdout)
+
+        limited = self.run_script(
+            "--max-referrals", "0", "--no-rdap", "111.249.0.1",
+            TEST_DEFAULT="twnic",
+        )
+        self.assertEqual(limited.returncode, 0, limited.stderr)
+        self.assertEqual(self.call_lines(), ["whois 111.249.0.1"])
+
+    def test_twnic_distinct_referral_adds_more_specific_record(self):
+        detail = """inetnum: 111.249.0.0 - 111.249.0.255
+netname: HINET-ACCESS
+descr: Chunghwa Telecom Residential Access
+status: ASSIGNED NON-PORTABLE
+remarks: Residential ADSL/FTTB
+"""
+        result = self.run_script(
+            "--format", "json", "--no-rdap", "111.249.0.1",
+            TEST_DEFAULT="twnic", TEST_TWNIC_REFERRAL=detail,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIn("WHOIS referral: whois.twnic.net", data["data"]["whoisRaw"])
+        self.assertIn("111.249.0.0 - 111.249.0.255", data["data"]["whoisRaw"])
+
+        summary = self.run_script(
+            "--no-rdap", "--no-hints", "111.249.0.1",
+            TEST_DEFAULT="twnic", TEST_TWNIC_REFERRAL=detail,
+        )
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertIn("Network name:   HINET-ACCESS", summary.stdout)
+        self.assertIn("Chunghwa Telecom Residential Access", summary.stdout)
+        self.assertIn("Network note:   Residential ADSL/FTTB", summary.stdout)
+
+        same_prefix = detail.replace("111.249.0.0 - 111.249.0.255", "111.249.0.0 - 111.249.255.255")
+        equal_range = self.run_script(
+            "--no-rdap", "--no-hints", "111.249.0.1",
+            TEST_DEFAULT="twnic", TEST_TWNIC_REFERRAL=same_prefix,
+        )
+        self.assertEqual(equal_range.returncode, 0, equal_range.stderr)
+        self.assertIn("Network name:   HINET-ACCESS", equal_range.stdout)
+        self.assertIn("Chunghwa Telecom Residential Access", equal_range.stdout)
+
+    def test_ipv6_ranges_select_most_specific_record(self):
+        result = self.run_script(
+            "--no-rdap", "--no-hints", "2001:db8:abcd::42",
+            TEST_DEFAULT="ipv6",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Network name:   CHILD-V6", result.stdout)
+        self.assertIn("Network type:   CUSTOMER", result.stdout)
+        self.assertIn("WHOIS status:   ASSIGNED", result.stdout)
+        self.assertIn("Network note:   Residential fiber", result.stdout)
+        self.assertIn("Child Network", result.stdout)
+        self.assertNotIn("Parent Registry", result.stdout)
 
     def test_whois_failure_and_partial_status(self):
         failed = self.run_script("--format", "json", "--no-rdap", "211.46.181.148", TEST_DEFAULT="fail")
