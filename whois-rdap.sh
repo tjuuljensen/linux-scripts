@@ -21,10 +21,10 @@
 #   bash, whois, curl, jq, python3, grep, awk, sed, sort, date
 #
 # Version:
-#   1.4.0
+#   1.5.0
 #
 # Date:
-#   2026-07-02
+#   2026-11-09
 #
 # Notes:
 #   - RDAP is queried through the configured RDAP bootstrap/base service.
@@ -36,7 +36,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 SCRIPT_NAME="${0##*/}"
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 
 TARGET=""
 TARGET_TYPE=""
@@ -73,6 +73,14 @@ C_BOLD=""
 WHOIS_TEXT=""
 RDAP_JSON=""
 WHOIS_STATUS="not_run"
+WHOIS_ERROR=""
+WHOIS_SUCCESS_COUNT=0
+WHOIS_FAILURE_COUNT=0
+WHOIS_LAST_TEXT=""
+WHOIS_LAST_SUCCESS=0
+WHOIS_REFERRAL_COUNT=0
+WHOIS_KRNIC_COLLECTED=0
+declare -A WHOIS_QUERIED_SERVERS=()
 RDAP_STATUS="not_run"
 RDAP_ERROR=""
 
@@ -112,7 +120,7 @@ Options:
       Save raw WHOIS and RDAP responses to files.
 
   --raw
-      Print raw collected WHOIS/RDAP data instead of only normalized summary.
+      Print raw collected WHOIS/RDAP data after the normalized summary.
 
   --format text|json
       Output format.
@@ -173,8 +181,10 @@ Options:
       Show version information.
 
 Notes:
-  - Default output is normalized text printed to stdout.
+  - Default output is a normalized text summary.
   - --save writes raw evidence files but still prints the normalized summary.
+  - IP network type comes from the most specific matching WHOIS range.
+    RDAP registry type is shown separately.
   - WHOIS and RDAP can differ; collect both when accuracy matters.
   - RDAP support varies by TLD/registry and IP allocation.
 
@@ -386,7 +396,7 @@ normalize_target() {
   local result
 
   result="$(
-    python3 - "$TARGET" <<'PY'
+    python3 - "$TARGET" 2>&1 <<'PY'
 import ipaddress
 import re
 import sys
@@ -395,22 +405,39 @@ from urllib.parse import urlparse
 raw = sys.argv[1].strip()
 
 if not raw:
-    raise SystemExit("ERROR: empty target")
+    raise SystemExit("empty target")
 
 candidate = raw
 
-if "://" in candidate:
-    parsed = urlparse(candidate)
-    candidate = parsed.hostname or ""
-else:
-    parsed = urlparse("//" + candidate)
-    if parsed.hostname:
-        candidate = parsed.hostname
+try:
+    if "://" in candidate:
+        parsed = urlparse(candidate)
+        candidate = parsed.hostname or ""
+        _ = parsed.port
+    elif candidate.startswith("["):
+        parsed = urlparse("//" + candidate)
+        candidate = parsed.hostname or ""
+        _ = parsed.port
+    else:
+        try:
+            ip = ipaddress.ip_address(candidate)
+        except ValueError:
+            # A bare address with multiple colons cannot be a domain or host:port.
+            if candidate.count(":") >= 2:
+                raise SystemExit(f"malformed IP address: {raw}")
+            parsed = urlparse("//" + candidate)
+            candidate = parsed.hostname or candidate
+            _ = parsed.port
+        else:
+            print(f"ip\t{ip.compressed}")
+            raise SystemExit(0)
+except ValueError:
+    raise SystemExit(f"malformed IP address: {raw}") from None
 
-candidate = candidate.strip().strip("[]").strip(".").lower()
+candidate = candidate.strip().lower()
 
 if not candidate:
-    raise SystemExit("ERROR: could not extract target")
+    raise SystemExit("could not extract target")
 
 try:
     ip = ipaddress.ip_address(candidate)
@@ -419,20 +446,28 @@ try:
 except ValueError:
     pass
 
+if re.fullmatch(r"[0-9.]+", candidate) or ":" in candidate:
+    raise SystemExit(f"malformed IP address: {raw}")
+
+candidate = candidate.rstrip(".")
+
 if not re.fullmatch(r"[a-z0-9.-]+", candidate):
-    raise SystemExit(f"ERROR: unsupported target syntax: {raw}")
+    raise SystemExit(f"unsupported target syntax: {raw}")
 
 if ".." in candidate or "." not in candidate:
-    raise SystemExit(f"ERROR: target does not look like a domain or IP: {raw}")
+    raise SystemExit(f"target does not look like a domain or IP: {raw}")
 
 labels = candidate.split(".")
 
 if any(not label or len(label) > 63 for label in labels):
-    raise SystemExit(f"ERROR: invalid domain label in target: {raw}")
+    raise SystemExit(f"invalid domain label in target: {raw}")
 
 print(f"domain\t{candidate}")
 PY
-  )" || die "$result"
+  )" || {
+    err "$result"
+    exit 2
+  }
 
   TARGET_TYPE="${result%%$'\t'*}"
   NORMALIZED_TARGET="${result#*$'\t'}"
@@ -566,6 +601,39 @@ run_whois_command() {
   return "$rc"
 }
 
+perform_whois_lookup() {
+  local rc=0
+  local label=""
+  local detail=""
+
+  printf -v label '%s ' "$@"
+  label="${label% }"
+  WHOIS_LAST_SUCCESS=0
+  if WHOIS_LAST_TEXT="$(run_whois_command "$@")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ "$rc" -eq 0 && -n "$WHOIS_LAST_TEXT" ]]; then
+    WHOIS_LAST_SUCCESS=1
+    WHOIS_SUCCESS_COUNT=$((WHOIS_SUCCESS_COUNT + 1))
+    if [[ "$WHOIS_LAST_TEXT" == *"- KISA/KRNIC WHOIS Service -"* ]]; then
+      WHOIS_KRNIC_COLLECTED=1
+    fi
+  else
+    WHOIS_FAILURE_COUNT=$((WHOIS_FAILURE_COUNT + 1))
+    detail="${WHOIS_LAST_TEXT%%$'\n'*}"
+    if [[ "$rc" -eq 0 ]]; then
+      detail="empty response"
+    fi
+    if [[ -z "$WHOIS_ERROR" ]]; then
+      WHOIS_ERROR="WHOIS query failed for ${label}: ${detail}"
+    fi
+    warn "WHOIS query failed for ${label}: ${detail}"
+  fi
+}
+
 extract_whois_referral_server() {
   local text="$1"
 
@@ -593,6 +661,110 @@ extract_whois_referral_server() {
     head -n 1
 }
 
+extract_whois_ip_referral_server() {
+  local response="$1"
+  local candidate=""
+
+  candidate="$(
+    printf '%s\n' "$response" |
+      awk '
+        {
+          line = tolower($0)
+          if (line ~ /^[[:space:]]*(refer|whois|whois server|referralserver):[[:space:]]*/) {
+            sub(/^[^:]+:[[:space:]]*/, "", $0)
+            split($0, parts, /[[:space:]]+/)
+            print parts[1]
+            exit
+          }
+          if (line ~ /^remarks:[[:space:]]*(krnic )?whois server at[[:space:]]+/) {
+            sub(/^.*[[:space:]]at[[:space:]]+/, "", $0)
+            split($0, parts, /[[:space:]]+/)
+            print parts[1]
+            exit
+          }
+        }
+      '
+  )"
+
+  [[ -n "$candidate" ]] || return 0
+
+  python3 - "$candidate" <<'PY'
+import ipaddress
+import re
+import sys
+
+host = sys.argv[1].strip().lower()
+if host.startswith("whois://"):
+    host = host[8:]
+host = host.rstrip(".")
+if host.endswith(":43"):
+    host = host[:-3]
+
+if len(host) > 253 or not re.fullmatch(r"[a-z0-9.-]+", host):
+    raise SystemExit(1)
+labels = host.split(".")
+if len(labels) < 2 or any(
+    not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+    for label in labels
+):
+    raise SystemExit(1)
+if host.endswith((".local", ".internal", ".test", ".invalid", ".example")):
+    raise SystemExit(1)
+try:
+    ipaddress.ip_address(host)
+except ValueError:
+    print(host)
+else:
+    raise SystemExit(1)
+PY
+}
+
+follow_whois_ip_referrals() {
+  local ip="$1"
+  local response="$2"
+  local referral=""
+  local depth=0
+  local file=""
+
+  while [[ "$depth" -lt "$MAX_REFERRALS" ]]; do
+    referral="$(extract_whois_ip_referral_server "$response")" || {
+      warn "Ignoring invalid WHOIS referral server."
+      break
+    }
+    [[ -n "$referral" ]] || break
+
+    if [[ -n "${WHOIS_QUERIED_SERVERS[$referral]:-}" ]]; then
+      verbose "Skipping repeated WHOIS referral server: $referral"
+      break
+    fi
+    if [[ "$WHOIS_KRNIC_COLLECTED" -eq 1 && ( "$referral" == "whois.kisa.or.kr" || "$referral" == "whois.nic.or.kr" ) ]]; then
+      verbose "Skipping KRNIC referral; authoritative KRNIC data is already collected."
+      break
+    fi
+
+    WHOIS_QUERIED_SERVERS["$referral"]=1
+    depth=$((depth + 1))
+    WHOIS_REFERRAL_COUNT=$((WHOIS_REFERRAL_COUNT + 1))
+    log "Following IP WHOIS referral ${depth}/${MAX_REFERRALS}: $referral"
+
+    perform_whois_lookup -h "$referral" "$ip"
+    response="$WHOIS_LAST_TEXT"
+    WHOIS_TEXT+=$'\n'
+    WHOIS_TEXT+="===== WHOIS referral: ${referral} ====="
+    WHOIS_TEXT+=$'\n'
+    WHOIS_TEXT+="$response"
+    WHOIS_TEXT+=$'\n'
+
+    if [[ "$SAVE_OUTPUT" -eq 1 ]]; then
+      file="${OUTPUT_DIR}/whois-ip-referral-${WHOIS_REFERRAL_COUNT}-$(safe_filename "$referral").txt"
+      save_text_file "$file" "$response"
+      WHOIS_FILES+=("$file")
+    fi
+
+    [[ "$WHOIS_LAST_SUCCESS" -eq 1 ]] || break
+  done
+}
+
 collect_whois_domain() {
   local query="$1"
   local current_query="$query"
@@ -605,7 +777,8 @@ collect_whois_domain() {
 
   log "Collecting WHOIS for domain: $query"
 
-  text="$(run_whois_command "$current_query" || true)"
+  perform_whois_lookup "$current_query"
+  text="$WHOIS_LAST_TEXT"
   combined+=$'===== WHOIS default =====\n'
   combined+="$text"
   combined+=$'\n'
@@ -616,7 +789,9 @@ collect_whois_domain() {
     WHOIS_FILES+=("$file")
   fi
 
-  referral="$(extract_whois_referral_server "$text")"
+  if [[ "$WHOIS_LAST_SUCCESS" -eq 1 ]]; then
+    referral="$(extract_whois_referral_server "$text")"
+  fi
 
   while [[ -n "$referral" && "$depth" -lt "$MAX_REFERRALS" ]]; do
     if grep -Fqx -- "$referral" <<< "$seen_servers"; then
@@ -629,7 +804,8 @@ collect_whois_domain() {
 
     log "Following WHOIS referral ${depth}/${MAX_REFERRALS}: $referral"
 
-    text="$(run_whois_command -h "$referral" "$query" || true)"
+    perform_whois_lookup -h "$referral" "$query"
+    text="$WHOIS_LAST_TEXT"
 
     combined+=$'\n'
     combined+="===== WHOIS referral: ${referral} ====="
@@ -643,11 +819,13 @@ collect_whois_domain() {
       WHOIS_FILES+=("$file")
     fi
 
-    referral="$(extract_whois_referral_server "$text")"
+    referral=""
+    if [[ "$WHOIS_LAST_SUCCESS" -eq 1 ]]; then
+      referral="$(extract_whois_referral_server "$text")"
+    fi
   done
 
   WHOIS_TEXT="$combined"
-  WHOIS_STATUS="collected"
 }
 
 collect_whois_ip_default() {
@@ -657,7 +835,8 @@ collect_whois_ip_default() {
 
   log "Collecting WHOIS for IP: $ip"
 
-  text="$(run_whois_command "$ip" || true)"
+  perform_whois_lookup "$ip"
+  text="$WHOIS_LAST_TEXT"
 
   WHOIS_TEXT+=$'===== WHOIS default =====\n'
   WHOIS_TEXT+="$text"
@@ -669,7 +848,9 @@ collect_whois_ip_default() {
     WHOIS_FILES+=("$file")
   fi
 
-  WHOIS_STATUS="collected"
+  if [[ "$WHOIS_LAST_SUCCESS" -eq 1 ]]; then
+    follow_whois_ip_referrals "$ip" "$text"
+  fi
 }
 
 collect_whois_ip_all_rirs() {
@@ -688,7 +869,9 @@ collect_whois_ip_all_rirs() {
   for rir in "${rirs[@]}"; do
     log "Collecting WHOIS from RIR server: $rir"
 
-    text="$(run_whois_command -h "$rir" "$ip" || true)"
+    WHOIS_QUERIED_SERVERS["$rir"]=1
+    perform_whois_lookup -h "$rir" "$ip"
+    text="$WHOIS_LAST_TEXT"
 
     WHOIS_TEXT+=$'\n'
     WHOIS_TEXT+="===== WHOIS RIR: ${rir} ====="
@@ -701,9 +884,11 @@ collect_whois_ip_all_rirs() {
       save_text_file "$file" "$text"
       WHOIS_FILES+=("$file")
     fi
-  done
 
-  WHOIS_STATUS="collected"
+    if [[ "$WHOIS_LAST_SUCCESS" -eq 1 ]]; then
+      follow_whois_ip_referrals "$ip" "$text"
+    fi
+  done
 }
 
 collect_whois() {
@@ -726,6 +911,14 @@ collect_whois() {
     if [[ "$RIR_ALL" -eq 1 ]]; then
       collect_whois_ip_all_rirs "$NORMALIZED_TARGET"
     fi
+  fi
+
+  if [[ "$WHOIS_SUCCESS_COUNT" -eq 0 ]]; then
+    WHOIS_STATUS="unavailable"
+  elif [[ "$WHOIS_FAILURE_COUNT" -gt 0 ]]; then
+    WHOIS_STATUS="partial"
+  else
+    WHOIS_STATUS="collected"
   fi
 }
 
@@ -832,8 +1025,7 @@ whois_field_first() {
 
   printf '%s\n' "$WHOIS_TEXT" |
     awk -v pat="$pattern" '
-      BEGIN { IGNORECASE=1 }
-      $0 ~ pat {
+      tolower($0) ~ tolower(pat) {
         sub(/^[^:]+:[[:space:]]*/, "", $0)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
         if ($0 != "") {
@@ -849,14 +1041,54 @@ whois_field_all_unique() {
 
   printf '%s\n' "$WHOIS_TEXT" |
     awk -v pat="$pattern" '
-      BEGIN { IGNORECASE=1 }
-      $0 ~ pat {
+      tolower($0) ~ tolower(pat) {
         sub(/^[^:]+:[[:space:]]*/, "", $0)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
         if ($0 != "") print
       }
     ' |
     sort -u
+}
+
+whois_ip_network_types() {
+  # Report classifications only from the smallest matching WHOIS range.
+  # A broader allocation's type does not describe a more specific assignment.
+  python3 -c '
+import ipaddress
+import re
+import sys
+
+target = ipaddress.ip_address(sys.argv[1])
+range_pattern = re.compile(r"^(?:IPv[46] Address|NetRange|inetnum|inet6num)\s*:\s*(\S+)\s*-\s*(\S+)", re.I)
+type_pattern = re.compile(r"^Network Type\s*:\s*(\S(?:.*\S)?)\s*$", re.I)
+records = []
+current = None
+
+for line in sys.stdin:
+    if line.startswith("===== WHOIS"):
+        current = None
+        continue
+    match = range_pattern.match(line)
+    if match:
+        try:
+            start, end = (ipaddress.ip_address(value) for value in match.groups())
+        except ValueError:
+            current = None
+            continue
+        current = None
+        if start.version == target.version and start <= target <= end:
+            current = [int(end) - int(start), None]
+            records.append(current)
+        continue
+    match = type_pattern.match(line)
+    if current is not None and match:
+        current[1] = match.group(1)
+
+if records:
+    smallest = min(record[0] for record in records)
+    for value in sorted({kind for size, kind in records if size == smallest and kind}):
+        print(value)
+' "$NORMALIZED_TARGET" <<< "$WHOIS_TEXT"
 }
 
 rdap_jq_first() {
@@ -893,9 +1125,16 @@ print_text_summary() {
   local rdap_nameservers=""
   local rdap_events=""
   local ip_name=""
-  local ip_org=""
+  local ip_org_values=""
+  local ip_networks=""
+  local ip_network_types=""
   local ip_country=""
   local abuse_email=""
+  local contact_email=""
+  local rdap_network=""
+  local rdap_type=""
+  local rdap_description=""
+  local rdap_contacts=""
 
   registrar="$(whois_field_first '^(Registrar|Sponsoring Registrar|registrar):')"
   created="$(whois_field_first '^(Creation Date|Created On|Created|Registered):')"
@@ -904,10 +1143,21 @@ print_text_summary() {
   status_values="$(whois_field_all_unique '^(Domain Status|Status|state):')"
   nameservers="$(whois_field_all_unique '^(Name Server|Nameserver|nserver):')"
 
-  ip_name="$(whois_field_first '^(NetName|netname|Network Name):')"
-  ip_org="$(whois_field_first '^(OrgName|org-name|descr|owner):')"
+  ip_name="$(whois_field_first '^(Service Name|NetName|Network Name)[[:space:]]*:')"
+  ip_org_values="$(whois_field_all_unique '^Organization Name[[:space:]]*:')"
+  if [[ -z "$ip_org_values" ]]; then
+    ip_org_values="$(whois_field_all_unique '^(OrgName|org-name|descr|owner)[[:space:]]*:')"
+  fi
+  ip_networks="$(whois_field_all_unique '^IPv[46] Address[[:space:]]*:')"
+  if [[ -z "$ip_networks" ]]; then
+    ip_networks="$(whois_field_all_unique '^(NetRange|inetnum|inet6num|CIDR)[[:space:]]*:')"
+  fi
+  if [[ "$TARGET_TYPE" == "ip" && "$WHOIS_SUCCESS_COUNT" -gt 0 ]]; then
+    ip_network_types="$(whois_ip_network_types)"
+  fi
   ip_country="$(whois_field_first '^(Country|country):')"
-  abuse_email="$(whois_field_first '^(OrgAbuseEmail|abuse-mailbox|abuse-c|Email):')"
+  abuse_email="$(whois_field_first '^(OrgAbuseEmail|abuse-mailbox)[[:space:]]*:')"
+  contact_email="$(whois_field_first '^(E-Mail|OrgTechEmail|OrgNOCEmail)[[:space:]]*:')"
 
   rdap_name="$(rdap_jq_first '.ldhName // .unicodeName // .name')"
   rdap_handle="$(rdap_jq_first '.handle')"
@@ -919,6 +1169,23 @@ print_text_summary() {
       jq -r '.events[]? | "\(.eventAction): \(.eventDate)"' <<< "$RDAP_JSON" 2>/dev/null | sort -u
     fi
   )"
+  if [[ "$TARGET_TYPE" == "ip" && "$RDAP_STATUS" == "collected" ]]; then
+    rdap_network="$(rdap_jq_first 'if .startAddress and .endAddress then "\(.startAddress) - \(.endAddress)" else empty end')"
+    rdap_type="$(rdap_jq_first '.type')"
+    rdap_description="$(rdap_jq_first '.remarks[]? | select(.title == "description") | .description[]?')"
+    rdap_contacts="$(
+      jq -r '
+        def values($e; $field):
+          [($e.vcardArray[1] // [])[]? | select(.[0] == $field) | .[3] | select(type == "string")] | unique;
+        .entities[]? as $e
+        | ($e.roles // ["contact"])[] as $role
+        | (values($e; "fn")[0] // $e.handle // "unknown") as $name
+        | (values($e; "email") | join(", ")) as $email
+        | (values($e; "tel") | join(", ")) as $phone
+        | "\($role): \($name)\(if $email == "" then "" else " <\($email)>" end)\(if $phone == "" then "" else " (\($phone))" end)"
+      ' <<< "$RDAP_JSON" 2>/dev/null | sort -u | awk 'NR <= 6 { print }'
+    )"
+  fi
 
   printf '%s\n' "${C_BOLD}Target${C_RESET}"
   printf '%s\n' "======"
@@ -935,6 +1202,10 @@ print_text_summary() {
   printf '%s\n' "=========="
   printf '  WHOIS:          %s\n' "$WHOIS_STATUS"
   printf '  RDAP:           %s\n' "$RDAP_STATUS"
+
+  if [[ -n "$WHOIS_ERROR" ]]; then
+    printf '  WHOIS error:    %s\n' "$WHOIS_ERROR"
+  fi
 
   if [[ -n "$RDAP_ERROR" ]]; then
     printf '  RDAP error:     %s\n' "$RDAP_ERROR"
@@ -992,17 +1263,41 @@ print_text_summary() {
     printf '%s\n' "================"
 
     [[ -n "$ip_name" ]] && printf '  Network name:   %s\n' "$ip_name"
-    [[ -n "$ip_org" ]] && printf '  Organization:   %s\n' "$ip_org"
+    if [[ -n "$ip_networks" ]]; then
+      printf '  Network ranges:\n'
+      sed 's/^/    - /' <<< "$ip_networks"
+    fi
+    if [[ -n "$ip_network_types" ]]; then
+      if [[ "$ip_network_types" == *$'\n'* ]]; then
+        printf '  Network types (conflicting):\n'
+        sed 's/^/    - /' <<< "$ip_network_types"
+      else
+        printf '  Network type:   %s\n' "$ip_network_types"
+      fi
+    fi
+    if [[ -n "$ip_org_values" ]]; then
+      printf '  Organizations:\n'
+      sed 's/^/    - /' <<< "$ip_org_values"
+    fi
     [[ -n "$ip_country" ]] && printf '  Country:        %s\n' "$ip_country"
     [[ -n "$abuse_email" ]] && printf '  Abuse email:    %s\n' "$abuse_email"
+    [[ -n "$contact_email" ]] && printf '  Contact email:  %s\n' "$contact_email"
 
     printf '\n'
     printf '%s\n' "${C_BOLD}RDAP Highlights${C_RESET}"
     printf '%s\n' "==============="
 
     [[ -n "$rdap_name" ]] && printf '  Name:           %s\n' "$rdap_name"
-    [[ -n "$rdap_handle" ]] && printf '  Handle:         %s\n' "$rdap_handle"
+    [[ -n "$rdap_handle" && "$rdap_handle" != "$rdap_network" ]] && printf '  Handle:         %s\n' "$rdap_handle"
+    [[ -n "$rdap_network" ]] && printf '  Network range:  %s\n' "$rdap_network"
+    [[ -n "$rdap_type" ]] && printf '  Registry type:  %s\n' "$rdap_type"
+    [[ -n "$rdap_description" ]] && printf '  Description:    %s\n' "$rdap_description"
     [[ -n "$rdap_country" ]] && printf '  Country:        %s\n' "$rdap_country"
+
+    if [[ -n "$rdap_contacts" ]]; then
+      printf '  Contacts:\n'
+      sed 's/^/    - /' <<< "$rdap_contacts"
+    fi
 
     if [[ -n "$rdap_status_values" ]]; then
       printf '  Status:\n'
@@ -1020,7 +1315,7 @@ print_text_summary() {
     printf '%s\n' "${C_BOLD}Hints${C_RESET}"
     printf '%s\n' "====="
     printf '  - WHOIS and RDAP may differ; compare both before making decisions.\n'
-    printf '  - Use --save to preserve raw evidence for notes or escalation.\n'
+    printf '  - Use --raw for full records, or --save to preserve raw evidence.\n'
     printf '  - This tool does not perform passive DNS, reputation, CT-log, or web-content analysis.\n'
   fi
 
@@ -1085,6 +1380,7 @@ print_json_summary() {
     --arg targetType "$TARGET_TYPE" \
     --arg baseDomain "$BASE_DOMAIN" \
     --arg whoisStatus "$WHOIS_STATUS" \
+    --arg whoisError "$WHOIS_ERROR" \
     --arg rdapStatus "$RDAP_STATUS" \
     --arg rdapError "$RDAP_ERROR" \
     --arg outputDir "$OUTPUT_DIR" \
@@ -1101,6 +1397,7 @@ print_json_summary() {
       },
       collection: {
         whois: $whoisStatus,
+        whoisError: (if $whoisError == "" then null else $whoisError end),
         rdap: $rdapStatus,
         rdapError: (if $rdapError == "" then null else $rdapError end),
         outputDir: (if $outputDir == "" then null else $outputDir end),
@@ -1125,8 +1422,8 @@ print_output() {
 main() {
   parse_args "$@"
   init_colors
-  check_requirements
   normalize_target
+  check_requirements
   detect_base_domain
   prepare_output_dir
 
